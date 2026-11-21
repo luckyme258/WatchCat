@@ -70,7 +70,7 @@ object CapabilityProbe {
      * @param uid 被探测应用的 uid（本应用自己）
      * @param ctx 用于拿 filesDir 落盘
      */
-    fun run(ctx: Context, uid: Int, pkg: String): Report {
+    fun run(ctx: Context, uid: Int, pkg: String, permTarget: String = pkg): Report {
         val stamp = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX", Locale.US).format(Date())
         val state = readState(uid, pkg).toMutableMap()
         val rows = mutableListOf<Row>()
@@ -108,7 +108,7 @@ object CapabilityProbe {
 
         val json = NativeEngine.nativeCapability(pkg, stamp, probeLines.toString())
         // appops 之外的两条通道：权限（pm）与网络/设备（svc / cmd netpolicy）
-        val channels = runCatching { ChannelProbe.probePermissions(pkg) }.getOrDefault(emptyList()) +
+        val channels = runCatching { ChannelProbe.probePermissions(permTarget, pkg) }.getOrDefault(emptyList()) +
             runCatching { ChannelProbe.probeNetwork(uid) }.getOrDefault(emptyList())
 
         val v2 = buildV2Json(pkg, uid, stamp, json, channels)

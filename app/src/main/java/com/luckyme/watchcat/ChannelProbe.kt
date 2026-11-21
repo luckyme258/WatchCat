@@ -33,24 +33,45 @@ object ChannelProbe {
         val note: String = "",
     )
 
-    /** 权限通道：revoke → 回读 granted → grant 还原 */
-    fun probePermissions(pkg: String): List<Row> {
+    /**
+     * 权限通道：grant/revoke → 回读 granted → 还原。
+     *
+     * **同一件事不能拿本应用自己做靶子**：撤销一个正在运行的应用的运行时权限，系统会直接
+     * 以「permissions revoked」把该进程杀掉（实测日志 `ActivityManager: Killing … (adj 0): permissions revoked`）。
+     * 所以 targetPkg 等于自身时一律跳过，并把这句原因写进表里，免得以后有人以为没验。
+     *
+     * 已在本机用「停进程 + 外部执行」验证过闭环：CAMERA granted=false → `pm grant` → granted=true 可回读。
+     */
+    fun probePermissions(targetPkg: String, selfPkg: String): List<Row> {
+        if (targetPkg == selfPkg) {
+            return listOf(
+                Row(
+                    channel = "permission",
+                    target = "self",
+                    before = "-", want = "-", after = "-",
+                    writeCmd = "pm revoke/grant <target> <perm>",
+                    readCmd = "dumpsys package <target> | grep '<perm>:'",
+                    verdict = "skipped",
+                    note = "不能拿自身做靶子：撤销运行中应用的运行时权限会被系统杀进程（permissions revoked）；需选其他应用，或停掉应用后由外部执行",
+                )
+            )
+        }
         val perms = listOf(
             "android.permission.CAMERA",
             "android.permission.POST_NOTIFICATIONS",
             "android.permission.SYSTEM_ALERT_WINDOW",
         )
         return perms.map { perm ->
-            val readCmd = "dumpsys package $pkg | grep '$perm:'"
-            val before = readGrant(pkg, perm)
+            val readCmd = "dumpsys package $targetPkg | grep '$perm:'"
+            val before = readGrant(targetPkg, perm)
             // 试写档必须与原值相反：原值已是 false 还去 revoke，回读当然一样（假阳性）
             val want = if (before == "true") "false" else "true"
-            val writeCmd = if (want == "true") "pm grant $pkg $perm" else "pm revoke $pkg $perm"
+            val writeCmd = if (want == "true") "pm grant $targetPkg $perm" else "pm revoke $targetPkg $perm"
             val w = Shell.su(writeCmd)
-            val afterWrite = readGrant(pkg, perm)
-            val restoreCmd = if (before == "true") "pm grant $pkg $perm" else "pm revoke $pkg $perm"
+            val afterWrite = readGrant(targetPkg, perm)
+            val restoreCmd = if (before == "true") "pm grant $targetPkg $perm" else "pm revoke $targetPkg $perm"
             val r = Shell.su(restoreCmd)
-            val restored = readGrant(pkg, perm)
+            val restored = readGrant(targetPkg, perm)
 
             val err = firstError(w.output) ?: firstError(r.output)
             val verdict = when {
@@ -148,8 +169,7 @@ object ChannelProbe {
     }
 
     /** 从 dumpsys package 里读某个权限的 granted 状态；读不到用 "-"（不等于 false） */
-    private fun readGrant(pkg: String, perm: String): String {
-        val out = Shell.su("dumpsys package $pkg").output
+    private fun readGrant(pkg: String, perm: String): String {        val out = Shell.su("dumpsys package $pkg").output
         val line = out.lineSequence().firstOrNull { it.trim().startsWith("$perm:") }?.trim() ?: return "-"
         return when {
             line.contains("granted=true") -> "true"
