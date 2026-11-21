@@ -31,6 +31,9 @@ object CapabilityProbe {
     /** 探测试写用的目标档：`ignore`（给空数据）——比 `deny` 温和，误写也不至于让应用崩 */
     private const val WANT_MODE = 2
 
+    /** 原值已经是 ignore 时的替代试写档：`deny`。两者必选其一，保证「写前后可区分」 */
+    private const val PROBE_ALT_MODE = 3
+
     /** 探测清单：候选 op 表全部 + 三条 uid 作用域对照（uid 与包是两份存储，结论可能不同） */
     private val PKG_OPS = listOf(
         "CAMERA", "RECORD_AUDIO", "FINE_LOCATION", "COARSE_LOCATION",
@@ -51,6 +54,7 @@ object CapabilityProbe {
         val op: String,
         val scope: String,
         val before: Int,
+        val want: Int,
         val after: Int,
         val writeCode: Int,
         val restoreCode: Int,
@@ -75,10 +79,13 @@ object CapabilityProbe {
         for ((op, scope) in targets) {
             val scopeId = if (scope == "uid") 1 else 0
             val before = state[op to scope] ?: 0
+            // 试写目标必须与原值不同：原值已经是 ignore 时再写 ignore，
+            // 回读当然一致 —— 那会把「写不动」误判成「写得进」（第一轮就在 CAMERA(uid) 上踩到）
+            val want = if (before == WANT_MODE) PROBE_ALT_MODE else WANT_MODE
 
-            val setCmd = NativeEngine.nativeWriteOp(pkg, op, WANT_MODE, scopeId)
+            val setCmd = NativeEngine.nativeWriteOp(pkg, op, want, scopeId)
             if (setCmd == null) {
-                rows += Row(op, scope, before, before, -1, -1, "skipped", "unknown", "bad_name")
+                rows += Row(op, scope, before, want, before, -1, -1, "skipped", "unknown", "bad_name")
                 continue
             }
             val w = Shell.su(setCmd)
@@ -93,9 +100,9 @@ object CapabilityProbe {
             probeLines.append(op).append('\t')
                 .append(scope).append('\t')
                 .append(before).append('\t')
-                .append(WANT_MODE).append('\t')
+                .append(want).append('\t')
                 .append(after).append('\n')
-            rows += Row(op, scope, before, after, w.code, r?.code ?: -1, "pending", "pending", "pending")
+            rows += Row(op, scope, before, want, after, w.code, r?.code ?: -1, "pending", "pending", "pending")
         }
 
         val json = NativeEngine.nativeCapability(pkg, stamp, probeLines.toString())
@@ -118,23 +125,18 @@ object CapabilityProbe {
         return out
     }
 
-    /** 用引擎 JSON 里的结论覆盖占位值 */
+    /** 用引擎 JSON 里的结论覆盖占位值（数值列保留探测时记下的事实，不被覆盖） */
     private fun merge(rows: List<Row>, json: String?): List<Row> {
         if (json == null) return rows
-        val seen = mutableMapOf<Pair<String, String>, Row>()
+        val seen = mutableMapOf<Pair<String, String>, Triple<String, String, String>>()
         JUDGED_ROW.findAll(json).forEach { m ->
-            seen[m.groupValues[1] to m.groupValues[2]] = Row(
-                op = m.groupValues[1],
-                scope = m.groupValues[2],
-                before = 0, after = 0, writeCode = 0, restoreCode = 0,
-                verdict = m.groupValues[4],
-                channel = m.groupValues[3],
-                advice = m.groupValues[5],
-            )
+            // 组序：1=op 2=scope 3=channel 4=verdict 5=advice
+            seen[m.groupValues[1] to m.groupValues[2]] =
+                Triple(m.groupValues[4], m.groupValues[3], m.groupValues[5])
         }
         return rows.map { r ->
             val j = seen[r.op to r.scope] ?: return@map r
-            r.copy(verdict = j.verdict, channel = j.channel, advice = j.advice)
+            r.copy(verdict = j.first, channel = j.second, advice = j.third)
         }
     }
 
@@ -142,6 +144,8 @@ object CapabilityProbe {
         return runCatching {
             val f = File(ctx.filesDir, "capability_v1.json")
             f.writeText(json)
+            // 外部目录再放一份：run-as 在本机被 SELinux 挡了（走不通），要取证只能从这里 adb pull
+            ctx.getExternalFilesDir(null)?.let { dir -> runCatching { File(dir, "capability_v1.json").writeText(json) } }
             f.absolutePath
         }.getOrNull()
     }

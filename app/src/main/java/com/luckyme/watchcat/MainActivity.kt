@@ -149,13 +149,14 @@ class MainActivity : Activity() {
         val rows = report.rows
         val writable = rows.count { it.verdict == "writable" }
         val notWritable = rows.count { it.verdict == "not_writable" }
+        val partial = rows.count { it.verdict == "partial" }
         val appop = rows.count { it.channel == "appop" }
         val perm = rows.count { it.channel == "permission" }
-        appendAsync("capability = ${rows.size} 条：可写 $writable / 写不进 $notWritable；通道 appop $appop / permission $perm")
+        appendAsync("capability = ${rows.size} 条：可写 $writable / 写不进 $notWritable / 待复核 $partial；通道 appop $appop / permission $perm")
 
         // 可写的挑出来给人看（这才是界面能画开关的那批）
-        rows.filter { it.verdict == "writable" }.take(6).forEach {
-            appendAsync("cap-ok     = ${it.op}(${it.scope}) ${label(it.before)}→${label(it.after)}")
+        rows.filter { it.verdict == "writable" }.take(5).forEach {
+            appendAsync("cap-ok     = ${it.op}(${it.scope}) ${label(it.before)}→${label(it.after)}（试写 ${label(it.want)}）")
         }
         // 权限型且写不进的，必须明确指向权限通道，别让人以为是坏开关
         rows.firstOrNull { it.verdict == "not_writable" && it.channel == "permission" }?.let {
@@ -164,6 +165,10 @@ class MainActivity : Activity() {
         // 只读的非权限型（本机就是不认这次写入）
         rows.firstOrNull { it.verdict == "not_writable" && it.channel == "appop" }?.let {
             appendAsync("cap-note   = ${it.op}(${it.scope}) 写不进 → ${adviceText(it.advice)}")
+        }
+        // 回读既不是原值也不是期望值：必须有人看，不许静默算成「可写」
+        rows.filter { it.verdict == "partial" }.take(3).forEach {
+            appendAsync("cap-check  = ${it.op}(${it.scope}) 试写 ${label(it.want)} 后回读 ${label(it.after)}（原 ${label(it.before)}）")
         }
         appendAsync("cap-file   = ${report.savedPath ?: "未落盘"}")
     }
