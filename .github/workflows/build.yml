@@ -24,8 +24,12 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      # 注意：v3 默认 packages 是 "tools platform-tools"，而 `tools` 包已从 SDK 仓库下线，
+      # 默认值会让 sdkmanager 报 `Failed to find package 'tools'` 并整步失败。
       - name: Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools'
 
       - name: 装 platform 36 + build-tools 36（compileSdk 36 需要）
         run: |
