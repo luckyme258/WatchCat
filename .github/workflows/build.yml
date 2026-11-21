@@ -62,7 +62,8 @@ jobs:
       # 解析器回归：samples/ 里是 API 36 真机 `appops get` 的原样输出，
       # 只要系统新增 op / 新字段导致解析漏行，这一步就会红。
       - name: Zig 单测（含真机样本回归）
-        run: "$ZIG" test zig/src/appops.zig
+        run: |
+          "$ZIG" test zig/src/appops.zig
 
       # 签名必须与本地同源，否则 install -r 报 INSTALL_FAILED_UPDATE_INCOMPATIBLE。
       # 有 Secret 就用本地那份；没有就临时生成，并在产物名和摘要里标出来。
