@@ -36,15 +36,6 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
 
         window.setBackgroundDrawable(ColorDrawable(Ui.BG))
-        if (Build.VERSION.SDK_INT >= 30) {
-            window.setStatusBarColor(Ui.BG)
-            window.setNavigationBarColor(Ui.BG)
-            window.insetsController?.setSystemBarsAppearance(
-                0,
-                android.view.WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or
-                    android.view.WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS,
-            )
-        }
 
         val rootLayout = Ui.col(this)
         rootLayout.setBackgroundColor(Ui.BG)
@@ -79,6 +70,18 @@ class MainActivity : Activity() {
         rootLayout.addView(tabRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, Ui.dp(this, 54)))
 
         setContentView(rootLayout)
+
+        // 系统栏配色必须放在 setContentView 之后：DecorView 此时才存在，
+        // 之前拿 window.insetsController 会拿到 null 并抛 NPE（2026-11-21 真机崩过）。
+        if (Build.VERSION.SDK_INT >= 30) {
+            window.setStatusBarColor(Ui.BG)
+            window.setNavigationBarColor(Ui.BG)
+            window.insetsController?.setSystemBarsAppearance(
+                0,
+                android.view.WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or
+                    android.view.WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS,
+            )
+        }
 
         // 边到边：targetSdk 36 强制 edge-to-edge，内容必须自己让开系统栏
         rootLayout.setOnApplyWindowInsetsListener { v, insets ->
