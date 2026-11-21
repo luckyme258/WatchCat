@@ -8,6 +8,7 @@ import android.text.TextWatcher
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.widget.AbsListView
 import android.widget.BaseAdapter
 import android.widget.EditText
 import android.widget.ImageView
@@ -232,7 +233,7 @@ class AppsScreen(private val act: MainActivity) {
             arrow.setPadding(Ui.dp(act, 8), 0, Ui.dp(act, 2), 0)
             row.addView(arrow)
 
-            row.layoutParams = ListView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            row.layoutParams = AbsListView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
             return row
         }
     }
