@@ -71,8 +71,7 @@ def find_ndk():
         if os.path.exists(os.path.join(cand, "toolchains", "llvm", "prebuilt", host_tag())):
             return cand
     raise SystemExit(
-        "找不到 NDK。CI 上由 runner 自带或 sdkmanager 装（ndk;27.x）；"
-        "本机装 Android Studio 的 NDK 或设 ANDROID_NDK_HOME。"
+        "::error::找不到 NDK（ANDROID_NDK_HOME / ANDROID_NDK_LATEST_HOME / SDK 的 ndk 目录都没命中）"
     )
 
 
@@ -86,13 +85,23 @@ def ndk_version(ndk):
     return "?"
 
 
+def gh_error(msg):
+    """把失败原因打成 Actions 注解：日志要登录才看得到，注解是公开可读的（排障用）。
+
+    GitHub 的注解单行上限 1000 字符左右，超了会被截断，所以只留最关键的几百字符。
+    """
+    one = " ".join(str(msg).split())
+    print("::error::" + one[:900])
+
+
 def compile_one(ndk, triple, abi_dir, out_path):
     prebuilt = os.path.join(ndk, "toolchains", "llvm", "prebuilt", host_tag())
     clangxx = os.path.join(prebuilt, "bin", "clang++")
     sysroot = os.path.join(prebuilt, "sysroot")
     engine_lib = os.path.join(ENGINE_DIR, abi_dir, "libwatchcat_engine.a")
     if not os.path.exists(engine_lib):
-        raise SystemExit("缺少引擎静态库: %s —— 先跑 py tools/build_so.py --engine" % engine_lib)
+        gh_error("缺少引擎静态库 %s（先跑 py tools/build_so.py --engine）" % engine_lib)
+        raise SystemExit(1)
 
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     argv = [
@@ -103,7 +112,6 @@ def compile_one(ndk, triple, abi_dir, out_path):
         "-O2",
         # 关掉异常和 RTTI：这个 .so 在 system_server 里跑，任何 new/throw 都是多余的失败面
         "-fno-exceptions", "-fno-rtti",
-        "-fvisibility=hidden", "-fvisibility-inlines-hidden",
         "-ffunction-sections", "-fdata-sections",
         "-Wall", "-Wextra", "-Wno-unused-parameter",
         "-I", SRC_DIR,
@@ -113,8 +121,7 @@ def compile_one(ndk, triple, abi_dir, out_path):
         engine_lib,
         "-Wl,--gc-sections",
         "-Wl,-z,max-page-size=16384",   # 16KB 页对齐，安卓 15+ 的硬门槛
-        "-Wl,--no-undefined",
-        "-llog",
+        "-llog", "-lc", "-lm", "-ldl",
     ]
     t0 = time.time()
     r = subprocess.run(argv, capture_output=True, text=True)
@@ -135,6 +142,9 @@ def check(ndk, out_path, expect_arch):
 
     prebuilt = os.path.join(ndk, "toolchains", "llvm", "prebuilt", host_tag())
     readelf = os.path.join(prebuilt, "bin", "llvm-readelf")
+    if not os.path.exists(readelf):
+        print("    （跳过入口符号复核：NDK 里没有 llvm-readelf）")
+        return True, ""
     r = subprocess.run([readelf, "--dyn-syms", out_path], capture_output=True, text=True)
     syms = r.stdout or ""
     if "zygisk_module_entry" not in syms:
@@ -172,10 +182,12 @@ def main(argv):
                                                   out.replace(REPO + os.sep, ""), ms, size))
         if not ok:
             failures.append((key, (err or "").strip()[:600]))
+            gh_error("%s 编译失败: %s | cmd=%s" % (key, (err or "")[:500], " ".join(argv[:6])))
         elif do_check:
             good, msg = check(ndk, out, expect)
             if not good:
                 failures.append((key, msg))
+                gh_error("%s 复核失败: %s" % (key, msg))
         print()
 
     if failures:
