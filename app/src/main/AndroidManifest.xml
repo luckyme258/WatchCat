@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 空壳 APK：只用来验证 libwatchcat.so 能不能被装载、JNI 能不能解析。
+     不申请任何权限，不联网，没有持久化。加载失败会直接把原因显示在界面上。 -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.luckyme.watchcat">
+
+    <application
+        android:label="WatchCat 空壳"
+        android:hasCode="true"
+        android:extractNativeLibs="false">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:theme="@android:style/Theme.Material.Light.NoActionBar">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

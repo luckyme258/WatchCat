@@ -21,11 +21,12 @@ watchcat-appops.txt
 watchcat-audit.log
 snapshot*.json
 
-# 签名材料：只允许 keystore/debug.keystore（仅调试用、可公开共享的固定签名）
+# 签名材料：一律不入公开仓库
+# 这是权限管理工具，公开 debug key 等于允许别人签出同包名 APK。
+# 本机开发用 keystore/debug.keystore（本地生成、不提交）；CI 用时通过 Secret 注入。
 *.jks
 *.p12
-/keystore/*.keystore
-!/keystore/debug.keystore
+/keystore/
 
 # 编辑器 / 系统垃圾
 .vscode/
