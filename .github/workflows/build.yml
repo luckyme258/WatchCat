@@ -53,6 +53,11 @@ jobs:
       - name: 编译 .so（脚本内含对齐门禁）
         run: python tools/build_so.py
 
+      # 数据面引擎出静态库，再用 C 探针验一遍 ABI：名字/类型错了这里就红，
+      # 不用等到真机上 system_server 加载失败才发现。
+      - name: 编译数据面引擎 + ABI 探针
+        run: python tools/build_so.py --engine --probe
+
       - name: 独立复核 ELF（架构 / 16KB 对齐 / 符号 / 依赖）
         run: |
           python tools/elfcheck.py \
@@ -67,6 +72,7 @@ jobs:
           "$ZIG" test zig/src/snapshot.zig
           "$ZIG" test zig/src/writecmd.zig
           "$ZIG" test zig/src/capability.zig
+          "$ZIG" test zig/src/engine.zig
 
       # 签名必须与本地同源，否则 install -r 报 INSTALL_FAILED_UPDATE_INCOMPATIBLE。
       # 有 Secret 就用本地那份；没有就临时生成，并在产物名和摘要里标出来。
@@ -98,7 +104,25 @@ jobs:
       - name: 组装 debug APK
         run: gradle :app:assembleDebug --no-daemon --stacktrace
 
-      - name: 上传 artifact
+      # 模块包和 APK 同一次构建产出：用户拿到的「控制台 + 模块」必须来自同一个 commit，
+      # 否则配置协议对不上时很难判断是哪一头旧了。
+      - name: 打 Zygisk 模块包
+        run: python tools/build_module.py
+
+      - name: 产物摘要（APK 与模块包配对）
+        run: |
+          {
+            echo "### 本次产物（同一 commit，成对）"
+            echo ""
+            echo "| 文件 | 大小 | sha256 前 16 |"
+            echo "|---|---|---|"
+            for f in app/build/outputs/apk/debug/*.apk build/module/*.zip; do
+              [ -f "$f" ] || continue
+              printf '| `%s` | %s B | `%s` |\n' "$(basename "$f")" "$(stat -c%s "$f")" "$(sha256sum "$f" | cut -c1-16)"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 上传 APK
         uses: actions/upload-artifact@v4
         with:
           name: watchcat-debug${{ steps.ks.outputs.name }}
@@ -106,8 +130,18 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      - name: 上传模块包
+        uses: actions/upload-artifact@v4
+        with:
+          name: watchcat-module${{ steps.ks.outputs.name }}
+          path: build/module/*.zip
+          if-no-files-found: error
+          retention-days: 14
+
       - name: 发布到 Release（仅打 tag 时）
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: app/build/outputs/apk/debug/*.apk
+          files: |
+            app/build/outputs/apk/debug/*.apk
+            build/module/*.zip
