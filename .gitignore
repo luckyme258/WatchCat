@@ -1,0 +1,38 @@
+# WatchCat —— 公开仓库，这里只放源码与文档
+# 规则：凡是含本机路径、密钥、机器信息、构建产物的，一律不进库。
+
+# 本机说明（含局域网地址、密钥位置、机器名、密码与指纹）
+LOCAL-SYSTEM-GUIDE.md
+LOCAL-SYSTEM-GUIDE.md.bak
+
+# 所有备份（旧笔记里可能残留 IP / 密码 / 密钥指纹）
+*.bak
+
+# 本地产物与中间件
+/apk/
+/build/
+*.apk
+*.idsig
+*.dump.txt
+*.log
+
+# 策略快照与审计（含已安装应用清单，属敏感数据）
+watchcat-appops.txt
+watchcat-audit.log
+snapshot*.json
+
+# 签名材料：只允许 keystore/debug.keystore（仅调试用、可公开共享的固定签名）
+*.jks
+*.p12
+/keystore/*.keystore
+!/keystore/debug.keystore
+
+# 编辑器 / 系统垃圾
+.vscode/
+.idea/
+*.user
+Thumbs.db
+.DS_Store
+
+# 说明：app/src/main/jniLibs 下的 .so 是刻意入库的（约 3KB），
+# 这样 CI 不装 Zig 也能直接打 APK；是否改为 CI 现编，见规范第 20 章待收敛项。
