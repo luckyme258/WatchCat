@@ -62,6 +62,12 @@ public final class WatchCatModule extends XposedModule {
     private void writeMarker() {
         final File dir = new File(STATE_DIR);
         final File marker = new File(dir, "system_server.marker");
+        // P1 的证据不该依赖 P0 模块是否装过：目录不存在就自己建，建不出来再记原因。
+        // 之前没 mkdirs，导致没装 Zygisk 模块时 marker 永远是“未找到”，看起来像回调没跑。
+        if (!dir.isDirectory() && !dir.mkdirs()) {
+            log(Log.WARN, TAG, "p1: marker dir unavailable (probe only): " + dir.getAbsolutePath());
+            return;
+        }
         final String line = "stage=system_server"
                 + "\npid=" + Process.myPid()
                 + "\nframework=" + getFrameworkName()

@@ -53,6 +53,16 @@ jobs:
       - name: 编译 .so（脚本内含对齐门禁）
         run: python tools/build_so.py
 
+      # 溯源门禁：app/src/main/jniLibs 下的 .so 是构建产物，不许入库。
+      # 入库过的话，CI 每次重编都会把工作区改成 dirty → 模块包名恒为 -dirty，靠包名认 commit 就废了。
+      - name: 溯源门禁（native 产物不入库）
+        run: |
+          if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+            git status --short
+            echo "::error::构建产物被入库：工作区出现已跟踪改动（见上面清单），请 git rm --cached 后重提"
+            exit 1
+          fi
+
       # 数据面引擎出静态库，再用 C 探针验一遍 ABI：名字/类型错了这里就红，
       # 不用等到真机上 system_server 加载失败才发现。
       - name: 编译数据面引擎 + ABI 探针

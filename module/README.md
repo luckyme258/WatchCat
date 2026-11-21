@@ -51,6 +51,10 @@ py tools/build_module_native.py          # NDK 编 shim（build/native/zygisk/<a
 py tools/build_module.py --require-zygisk # 打 zip，自动把 shim 并成 zygisk/<abi>.so
 ```
 
+包内**只有** `module.prop`、四个脚本、本 README 和 `zygisk/arm64-v8a.so`（白名单，`tools/build_module.py`
+的 `PACK_FILES`）。`module/src/` 的源码与 `zygisk.hpp` 不进包；`x86_64.so` 只在 `--with-x86_64`
+时带上，供模拟器调试，不进发布包（规范 L8）。
+
 本机没 NDK 就只跑 CI——runner 自带 NDK，`tools/build_module_native.py` 会先复用再兜底。
 
 ## 下一步（P0-C）
