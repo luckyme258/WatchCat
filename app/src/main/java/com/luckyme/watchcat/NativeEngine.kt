@@ -26,9 +26,6 @@ object NativeEngine {
     /** 冒烟：不看参数，只证明调用链通了，固定返回 0x5743 */
     external fun nativePing(): Int
 
-    /** 冒烟：证明调用链通了，固定返回 0x5743 */
-    external fun nativePing(): Int
-
     /**
      * 能力表判定：把一轮探测的事实行（`OP \t scope \t beforeId \t wantId \t afterId`）丢进来，
      * 返回 `{"total","writable","notWritable","partial","channel","rows":[…]}`。

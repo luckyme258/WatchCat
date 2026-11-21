@@ -70,7 +70,6 @@ object CapabilityProbe {
         val state = readState(uid, pkg).toMutableMap()
         val rows = mutableListOf<Row>()
         val probeLines = StringBuilder()
-        val meta = mutableMapOf<Pair<String, String>, Triple<String, String, String>>()
 
         val targets = PKG_OPS.map { it to "package" } + UID_OPS.map { it to "uid" }
         for ((op, scope) in targets) {
