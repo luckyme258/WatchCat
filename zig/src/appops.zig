@@ -129,22 +129,33 @@ pub const ParseResult = struct {
 };
 
 /// 解析 `appops get` 的多行输出。内存由调用方 allocator 负责，用完 deinit。
-pub fn parseGet(alloc: std.mem.Allocator, input: []const u8) !ParseResult {
+///
+/// **`uid_line_count` 是必须由调用方提供的事实，不是可选项**：
+/// AOSP 的 `appops get` 会把 uid 段（PackageOps 的 packageName==null）排在包段之前，
+/// 且只在 uid 段**开头打印一次** `Uid mode: `（见 AppOpsService.java 的 get 分支，
+/// 2026-11-21 核对源码与真机）。也就是说这段文本里**没有任何行级标记**能区分两段，
+/// 解析器若自己猜边界，只会把 uid 的条目错标成包作用域——写操作就会写到错误的那份存储。
+/// 所以：调用方先跑 `appops get --uid <uid>` 数出 uid 段行数，再把数字传进来。
+pub fn parseGet(alloc: std.mem.Allocator, input: []const u8, uid_line_count: usize) !ParseResult {
     var list: std.ArrayList(Entry) = .empty;
     errdefer list.deinit(alloc);
     var skipped: usize = 0;
+    // 已经遇到的非空行序号（与 uid_line_count 比较决定作用域）
+    var line_index: usize = 0;
 
     var lines = std.mem.splitScalar(u8, input, '\n');
     while (lines.next()) |raw_line| {
         var line = std.mem.trim(u8, raw_line, " \t\r");
         if (line.len == 0) continue;
 
-        var scope: Scope = .package;
+        var scope: Scope = if (line_index < uid_line_count) .uid else .package;
         if (std.mem.startsWith(u8, line, "Uid mode:")) {
+            // 前缀只出现在 uid 段第一行；剥掉后这一行本身仍是一个条目
             scope = .uid;
             line = std.mem.trim(u8, line["Uid mode:".len..], " \t");
             if (line.len == 0) continue; // 只有段头、没有条目
         }
+        line_index += 1;
 
         // op 名里不会出现冒号，所以「第一个 ": " 」就是 op 与模式的边界
         const colon = std.mem.indexOf(u8, line, ": ") orelse {
@@ -238,7 +249,7 @@ test "解析普通条目与 Uid mode 单行段头" {
         \\POST_NOTIFICATION: ignore
         \\READ_SMS: ignore
     ;
-    var r = try parseGet(testing.allocator, raw);
+    var r = try parseGet(testing.allocator, raw, 1);
     defer r.deinit(testing.allocator);
 
     try testing.expectEqual(@as(usize, 4), r.entries.len);
@@ -260,7 +271,7 @@ test "解析 time / rejectTime / duration 三种字段" {
         \\ACTIVATE_VPN: allow; time=+10d21h10m4s888ms ago; rejectTime=+16d0h47m57s11ms ago
         \\CONTROL_AUDIO: foreground; time=+3d0h8m20s371ms ago; duration=+18s730ms
     ;
-    var r = try parseGet(testing.allocator, raw);
+    var r = try parseGet(testing.allocator, raw, 0);
     defer r.deinit(testing.allocator);
 
     try testing.expectEqual(@as(usize, 4), r.entries.len);
@@ -286,7 +297,7 @@ test "看不懂的行计数而不是丢弃或 panic" {
         \\MYSTERY_OP: weirdmode; time=+1s ago
         \\WAKE_LOCK: allow
     ;
-    var r = try parseGet(testing.allocator, raw);
+    var r = try parseGet(testing.allocator, raw, 0);
     defer r.deinit(testing.allocator);
 
     try testing.expectEqual(@as(usize, 2), r.entries.len);
@@ -297,7 +308,7 @@ test "看不懂的行计数而不是丢弃或 panic" {
 
 test "CRLF、空行、行尾空格都不影响解析" {
     const raw = "CAMERA: ignore\r\n\r\n  WAKE_LOCK: allow  \r\n";
-    var r = try parseGet(testing.allocator, raw);
+    var r = try parseGet(testing.allocator, raw, 0);
     defer r.deinit(testing.allocator);
 
     try testing.expectEqual(@as(usize, 2), r.entries.len);
@@ -308,7 +319,7 @@ test "CRLF、空行、行尾空格都不影响解析" {
 
 test "序列化成 JSON 且字段完整" {
     const raw = "CAMERA: ignore; time=+2s ago\nWAKE_LOCK: allow; duration=+363ms";
-    var r = try parseGet(testing.allocator, raw);
+    var r = try parseGet(testing.allocator, raw, 0);
     defer r.deinit(testing.allocator);
 
     const json = try toJson(testing.allocator, r);
@@ -353,7 +364,7 @@ const samples = [_]SampleCase{
 
 test "真机样本全量解析，一行都不许丢" {
     for (samples) |case| {
-        var r = try parseGet(testing.allocator, case.raw);
+        var r = try parseGet(testing.allocator, case.raw, 0);
         defer r.deinit(testing.allocator);
 
         try testing.expectEqual(@as(usize, 0), r.skipped);
@@ -367,7 +378,7 @@ test "真机样本全量解析，一行都不许丢" {
 
 test "真机样本解析出的模式都在五态之内" {
     for (samples) |case| {
-        var r = try parseGet(testing.allocator, case.raw);
+        var r = try parseGet(testing.allocator, case.raw, 0);
         defer r.deinit(testing.allocator);
 
         for (r.entries) |e| {
@@ -379,3 +390,54 @@ test "真机样本解析出的模式都在五态之内" {
         }
     }
 }
+
+test "作用域按 uid 段行数划分，边界不多不少" {
+    // 真机原样：3 条 uid 段条目 + 2 条包段条目（前缀只出现在第一行）
+    const raw =
+        \\Uid mode: CAMERA: ignore
+        \\RECORD_AUDIO: ignore
+        \\VIBRATE: deny
+        \\CAMERA: allow
+        \\ACCESS_RESTRICTED_SETTINGS: default
+    ;
+    var r = try parseGet(testing.allocator, raw, 3);
+    defer r.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 5), r.entries.len);
+    try testing.expectEqual(@as(usize, 0), r.skipped);
+    // 前 3 条 uid
+    try testing.expectEqual(Scope.uid, r.entries[0].scope);
+    try testing.expectEqual(Scope.uid, r.entries[1].scope);
+    try testing.expectEqual(Scope.uid, r.entries[2].scope);
+    // 其余是包作用域——这才是「写哪一份存储」的依据
+    try testing.expectEqual(Scope.package, r.entries[3].scope);
+    try testing.expectEqual(Scope.package, r.entries[4].scope);
+    // 同名 op 在两段里可以同时出现，模式不同，绝不能合并
+    try testing.expectEqualStrings("CAMERA", r.entries[0].op);
+    try testing.expectEqual(Mode.ignore, r.entries[0].mode);
+    try testing.expectEqualStrings("CAMERA", r.entries[3].op);
+    try testing.expectEqual(Mode.allow, r.entries[3].mode);
+}
+
+test "真机两段样本：uid 45 条 + 包 3 条" {
+    const uid_raw = @embedFile("samples/api36_self_uid.txt");
+    const all_raw = @embedFile("samples/api36_self_all.txt");
+
+    var u = try parseGet(testing.allocator, uid_raw, 0);
+    defer u.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 45), u.entries.len);
+    try testing.expectEqual(@as(usize, 0), u.skipped);
+
+    var a = try parseGet(testing.allocator, all_raw, 45);
+    defer a.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 48), a.entries.len);
+    try testing.expectEqual(@as(usize, 0), a.skipped);
+
+    // 边界：前 45 必须 uid，后 3 必须包
+    for (a.entries, 0..) |e, i| {
+        const expect_uid = i < 45;
+        try testing.expectEqual(if (expect_uid) Scope.uid else Scope.package, e.scope);
+    }
+    // 包段最后三条就是 VIBRATE / CAMERA / ACCESS_RESTRICTED_SETTINGS
+    try testing.expectEqualStrings("ACCESS_RESTRICTED_SETTINGS", a.entries[47].op);
+}
+

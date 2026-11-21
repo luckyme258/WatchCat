@@ -96,7 +96,7 @@ test "快照头齐全，且列数恒定" {
         \\Uid mode: COARSE_LOCATION: ignore
         \\WAKE_LOCK: allow; time=+3d0h8m56s467ms ago; duration=+363ms
     ;
-    var r = try appops.parseGet(testing.allocator, raw);
+    var r = try appops.parseGet(testing.allocator, raw, 1);
     defer r.deinit(testing.allocator);
 
     const snap = try toSnapshot(testing.allocator, r, "com.example.app", "2026-11-21T20:05:11+08:00");
@@ -123,7 +123,7 @@ test "快照头齐全，且列数恒定" {
 
 test "缺字段留空列，不省略列" {
     const raw = "CAMERA: deny\n";
-    var r = try appops.parseGet(testing.allocator, raw);
+    var r = try appops.parseGet(testing.allocator, raw, 0);
     defer r.deinit(testing.allocator);
 
     const snap = try toSnapshot(testing.allocator, r, "p", "t");
@@ -140,9 +140,9 @@ test "校验和随正文变化而变化" {
     const b =
         \\CAMERA: deny
     ;
-    var ra = try appops.parseGet(testing.allocator, a);
+    var ra = try appops.parseGet(testing.allocator, a, 0);
     defer ra.deinit(testing.allocator);
-    var rb = try appops.parseGet(testing.allocator, b);
+    var rb = try appops.parseGet(testing.allocator, b, 0);
     defer rb.deinit(testing.allocator);
 
     const sa = try toSnapshot(testing.allocator, ra, "p", "t");
@@ -158,7 +158,7 @@ test "校验和随正文变化而变化" {
 
 test "真机样本的快照能完整落盘" {
     const raw = @embedFile("samples/api36_adguard.txt");
-    var r = try appops.parseGet(testing.allocator, raw);
+    var r = try appops.parseGet(testing.allocator, raw, 0);
     defer r.deinit(testing.allocator);
 
     const snap = try toSnapshot(testing.allocator, r, "com.adguard.android", "2026-11-21T20:10:00+08:00");

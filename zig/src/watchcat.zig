@@ -81,8 +81,17 @@ var arena_buf: [ARENA_BYTES]u8 align(16) = undefined;
 /// 为什么命令不在 .so 里执行：本库不链 libc、不 fork（见 elfcheck 的 DT_NEEDED 为空），
 /// 执行权限属于已经拿到 Shizuku/root 授权的那一层；这里只做纯计算，方便主机侧单测。
 ///
+/// `uidLines` 是 **必填事实**：AOSP 的 `appops get` 里 uid 段与包段在文本上无法区分，
+/// 只有「先跑 `appops get --uid <uid>` 数出的行数」能划出边界（见 appops.parseGet 注释）。
+/// 传 0 等于声明「这份输出没有 uid 段」；传错会让包/uid 作用域整体错位。
+///
 /// 返回 null 表示失败（入参为 null / 取串失败 / 内存不够），JVM 侧按「读失败」处理。
-export fn Java_com_luckyme_watchcat_NativeEngine_nativeReadOps(env: jni.JNIEnv, clazz: jni.jclass, raw: jni.jstring) callconv(.c) jni.jstring {
+export fn Java_com_luckyme_watchcat_NativeEngine_nativeReadOps(
+    env: jni.JNIEnv,
+    clazz: jni.jclass,
+    raw: jni.jstring,
+    uid_lines: jni.jint,
+) callconv(.c) jni.jstring {
     _ = clazz;
     const text = raw orelse return null;
 
@@ -92,7 +101,7 @@ export fn Java_com_luckyme_watchcat_NativeEngine_nativeReadOps(env: jni.JNIEnv, 
     var fba = std.heap.FixedBufferAllocator.init(&arena_buf);
     const alloc = fba.allocator();
 
-    const parsed = appops.parseGet(alloc, std.mem.span(chars)) catch return null;
+    const parsed = appops.parseGet(alloc, std.mem.span(chars), nonNegative(uid_lines)) catch return null;
     const json = appops.toJson(alloc, parsed) catch return null;
     // NewStringUTF 要 NUL 结尾；arena 每次调用都从头分配，不需要手动回收
     const z = alloc.dupeSentinel(u8, json, 0) catch return null;
@@ -149,12 +158,19 @@ export fn Java_com_luckyme_watchcat_NativeEngine_nativeWriteOp(
 ///
 /// 时间戳由 Kotlin 传入（本库不链 libc，取不到系统时间；也让快照可复现）。
 /// 返回 null 表示失败，调用方**必须**当作「快照没拿到 → 不许写」处理。
+/// 把 JNI 传来的行数收成 usize；负数当 0（宁可按「没有 uid 段」解析，也不让它回绕成天文数字）
+fn nonNegative(v: jni.jint) usize {
+    if (v <= 0) return 0;
+    return @intCast(v);
+}
+
 export fn Java_com_luckyme_watchcat_NativeEngine_nativeSnapshot(
     env: jni.JNIEnv,
     clazz: jni.jclass,
     pkg: jni.jstring,
     raw: jni.jstring,
     stamp: jni.jstring,
+    uid_lines: jni.jint,
 ) callconv(.c) jni.jstring {
     _ = clazz;
 
@@ -173,7 +189,7 @@ export fn Java_com_luckyme_watchcat_NativeEngine_nativeSnapshot(
     var fba = std.heap.FixedBufferAllocator.init(&arena_buf);
     const alloc = fba.allocator();
 
-    const parsed = appops.parseGet(alloc, std.mem.span(raw_chars)) catch return null;
+    const parsed = appops.parseGet(alloc, std.mem.span(raw_chars), nonNegative(uid_lines)) catch return null;
     const snap = snapshot.toSnapshot(alloc, parsed, std.mem.span(pkg_chars), std.mem.span(stamp_chars)) catch return null;
     const z = alloc.dupeSentinel(u8, snap, 0) catch return null;
 

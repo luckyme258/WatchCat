@@ -41,7 +41,16 @@ object NativeEngine {
      * 分工：命令由拿到授权的 Kotlin 侧执行，Zig 只做纯计算 —— 所以本函数在主机上可单测，
      * 也不需要 .so 链 libc 或 fork。null 入参或内存不足时返回 null，调用方按「读失败」处理。
      */
-    external fun nativeReadOps(raw: String?): String?
+    /**
+     * 把 `appops get <pkg>` 的**原始输出**解析成 JSON（`{"count","skipped","ops":[…]}`）。
+     *
+     * 分工：命令由拿到授权的 Kotlin 侧执行，Zig 只做纯计算 —— 所以本函数在主机上可单测，
+     * 也不需要 .so 链 libc 或 fork。null 入参或内存不足时返回 null，调用方按「读失败」处理。
+     *
+     * @param uidLines **必填**：AOSP 的 `appops get` 里 uid 段与包段在文本上无法区分，
+     *   只能先跑 `appops get --uid <uid>` 数出 uid 段行数再传进来；传错会让作用域整体错位。
+     */
+    external fun nativeReadOps(raw: String?, uidLines: Int): String?
 
     /**
      * 写前快照：pkg + `appops get` 原始输出 + 时间戳（形如 `2026-11-21T20:05:11+08:00`）→ 文本。
@@ -49,7 +58,7 @@ object NativeEngine {
      * 返回 null 一律视为「快照没拿到」——按规范 W9，此时**不许执行任何写操作**。
      * 时间戳由这里传入，是因为 .so 不链 libc 取不到系统时间，顺带换来快照可复现。
      */
-    external fun nativeSnapshot(pkg: String?, raw: String?, stamp: String?): String?
+    external fun nativeSnapshot(pkg: String?, raw: String?, stamp: String?, uidLines: Int): String?
 
     /**
      * 写单个 op：返回一条 `appops set` 命令，**由调用方拿到 root/Shizuku 权限后执行**。
