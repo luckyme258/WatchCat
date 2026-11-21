@@ -58,6 +58,25 @@ jobs:
       - name: 编译数据面引擎 + ABI 探针
         run: python tools/build_so.py --engine --probe
 
+      # ubuntu runner 自带 NDK（版本随镜像变），所以先复用，找不到才装 —— 别为了「确定性」
+      # 无脑装一遍，那只会让这一步多花一两分钟还多一个失败点。
+      - name: 找 NDK
+        run: |
+          NDK="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_HOME}"
+          if [ -z "$NDK" ] || [ ! -d "$NDK" ]; then
+            NDK=$(ls -d "${ANDROID_SDK_ROOT:-$ANDROID_HOME}"/ndk/* 2>/dev/null | sort -V | tail -1)
+          fi
+          if [ -z "$NDK" ] || [ ! -d "$NDK" ]; then
+            echo "镜像里没有 NDK，装 27.x"
+            sdkmanager "ndk;27.2.12479018" > /dev/null
+            NDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}/ndk/27.2.12479018"
+          fi
+          echo "NDK=$NDK" >> "$GITHUB_ENV"
+          echo "NDK 版本：$(grep Pkg.Revision "$NDK/source.properties")"
+
+      - name: 编译 Zygisk shim（含 16KB 门禁与入口符号复核）
+        run: python tools/build_module_native.py
+
       - name: 独立复核 ELF（架构 / 16KB 对齐 / 符号 / 依赖）
         run: |
           python tools/elfcheck.py \
@@ -107,7 +126,7 @@ jobs:
       # 模块包和 APK 同一次构建产出：用户拿到的「控制台 + 模块」必须来自同一个 commit，
       # 否则配置协议对不上时很难判断是哪一头旧了。
       - name: 打 Zygisk 模块包
-        run: python tools/build_module.py
+        run: python tools/build_module.py --require-zygisk
 
       - name: 产物摘要（APK 与模块包配对）
         run: |

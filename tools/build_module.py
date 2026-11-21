@@ -23,6 +23,7 @@ import zipfile
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODULE_DIR = os.path.join(REPO, "module")
 OUT_DIR = os.path.join(REPO, "build", "module")
+NATIVE_DIR = os.path.join(REPO, "build", "native", "zygisk")
 ABIS = ("arm64-v8a", "x86_64")
 
 
@@ -54,7 +55,7 @@ def git_dirty():
         return False
 
 
-def collect():
+def collect(native_dir):
     files = []
     for root, dirs, names in os.walk(MODULE_DIR):
         dirs.sort()
@@ -62,6 +63,13 @@ def collect():
             full = os.path.join(root, name)
             rel = os.path.relpath(full, MODULE_DIR).replace(os.sep, "/")
             files.append((rel, full))
+    # shim .so 不进 git（是产物），打包时才从 build/native 并进来：
+    # 包里的路径必须是 zygisk/<abi>.so，文件名就是 Zygisk 认的 ABI 名，不能带 lib 前缀。
+    if native_dir and os.path.isdir(native_dir):
+        for abi in ABIS:
+            src = os.path.join(native_dir, abi + ".so")
+            if os.path.exists(src):
+                files.append(("zygisk/%s.so" % abi, src))
     return files
 
 
@@ -80,13 +88,16 @@ def add(zf, rel, full):
 
 def main(argv):
     require_zygisk = "--require-zygisk" in argv
+    native_dir = NATIVE_DIR
+    if "--no-native" in argv:
+        native_dir = None
 
     version = read_prop("version")
     version_code = read_prop("versionCode")
     sha = git_sha()
     dirty = git_dirty()
 
-    files = collect()
+    files = collect(native_dir)
     if not any(rel == "module.prop" for rel, _ in files):
         raise SystemExit("module/ 下没有 module.prop，打出来是废包")
 
