@@ -65,6 +65,7 @@ jobs:
         run: |
           "$ZIG" test zig/src/appops.zig
           "$ZIG" test zig/src/snapshot.zig
+          "$ZIG" test zig/src/writecmd.zig
 
       # 签名必须与本地同源，否则 install -r 报 INSTALL_FAILED_UPDATE_INCOMPATIBLE。
       # 有 Secret 就用本地那份；没有就临时生成，并在产物名和摘要里标出来。

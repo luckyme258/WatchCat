@@ -6,9 +6,12 @@
 //!   - 导出给 JVM 的函数**不超过 8 个**，一个函数一个职责；禁止在这里做 UI 或弹窗。
 //!
 //! 当前已实现（2026-11-21，真机 API 36 上 LOAD: PASS）：
-//!   nativeVersion / nativePing / nativeTag / nativeJniVersion / nativeModeName / nativeOpCount
+//!   nativeVersion / nativePing / nativeTag / nativeJniVersion / nativeOpCount
 //!   nativeReadOps(raw)   —— 把 `appops get` 的原始输出解析成 JSON（真机样本 7/7 单测通过）
 //!   nativeSnapshot(pkg, raw, stamp) —— 写前快照，带 FNV-1a 64 校验和（11/11 单测通过）
+//!   nativeWriteOp(pkg, op, mode, scope) —— 拼 `appops set` 命令（含白名单校验，12/12 通过）
+//!
+//! 已按规范 W7「导出 ≤ 8 个」用满上限：nativeModeName 已下线（五态文案归 Kotlin 界面层）。
 //!
 //! 待实现（对应规范 6 章的接口面，按需逐个补，不要一次全开）：
 //!   nativeReadOps(pkg)      -> 读全量 op（appops get 的解析结果）
@@ -22,6 +25,7 @@ const std = @import("std");
 const jni = @import("jni.zig");
 const appops = @import("appops.zig");
 const snapshot = @import("snapshot.zig");
+const writecmd = @import("writecmd.zig");
 
 /// 版本号，打包成 0x0001_0000 = 1.0.0。改版本要同步改 build 脚本里的说明。
 pub const version_packed: u32 = 0x0001_0000;
@@ -56,12 +60,7 @@ export fn Java_com_luckyme_watchcat_NativeEngine_nativeJniVersion(env: jni.JNIEn
     return jni.getVersion(env);
 }
 
-/// 把五态编号翻成界面文案；越界返回 "?"，不抛异常给 JVM
-export fn Java_com_luckyme_watchcat_NativeEngine_nativeModeName(env: jni.JNIEnv, clazz: jni.jclass, mode: jni.jint) callconv(.c) jni.jstring {
-    _ = clazz;
-    const m = appops.Mode.fromInt(mode) orelse return jni.newStringUtf(env, "?");
-    return jni.newStringUtf(env, m.label());
-}
+/// 已下线：nativeModeName（占用 8 个导出名额，五态文案属界面层，见《安卓开发规范》W7/W8）
 
 /// 候选 op 表的条数，供界面先画个占位列表
 export fn Java_com_luckyme_watchcat_NativeEngine_nativeOpCount(env: jni.JNIEnv, clazz: jni.jclass) callconv(.c) jni.jint {
@@ -98,6 +97,51 @@ export fn Java_com_luckyme_watchcat_NativeEngine_nativeReadOps(env: jni.JNIEnv, 
     // NewStringUTF 要 NUL 结尾；arena 每次调用都从头分配，不需要手动回收
     const z = alloc.dupeSentinel(u8, json, 0) catch return null;
 
+    return jni.newStringUtf(env, z.ptr);
+}
+
+/// 写单个 op：返回**一条可直接执行的 `appops set` 命令**，不在这里执行。
+///
+/// 参数：pkg、op、mode（0..4 五态）、scope（0=包作用域，1=uid 作用域）。
+/// 名字不干净（空白/引号/分号/换行/非 ASCII/超长）一律返回 null —— 这条命令要以 root 跑，
+/// 校验必须在拼串的**同一层**做完，不能指望调用方自己过滤。
+export fn Java_com_luckyme_watchcat_NativeEngine_nativeWriteOp(
+    env: jni.JNIEnv,
+    clazz: jni.jclass,
+    pkg: jni.jstring,
+    op: jni.jstring,
+    mode: jni.jint,
+    scope: jni.jint,
+) callconv(.c) jni.jstring {
+    _ = clazz;
+
+    const mode_val = appops.Mode.fromInt(mode) orelse return null;
+    const scope_val: appops.Scope = switch (scope) {
+        0 => .package,
+        1 => .uid,
+        else => return null,
+    };
+
+    const pkg_obj = pkg orelse return null;
+    const pkg_chars = jni.getStringUtfChars(env, pkg_obj) orelse return null;
+    defer jni.releaseStringUtfChars(env, pkg_obj, pkg_chars);
+
+    const op_obj = op orelse return null;
+    const op_chars = jni.getStringUtfChars(env, op_obj) orelse return null;
+    defer jni.releaseStringUtfChars(env, op_obj, op_chars);
+
+    var fba = std.heap.FixedBufferAllocator.init(&arena_buf);
+    const alloc = fba.allocator();
+
+    const cmd = writecmd.buildSetCommand(
+        alloc,
+        std.mem.span(pkg_chars),
+        std.mem.span(op_chars),
+        mode_val,
+        scope_val,
+    ) catch return null;
+
+    const z = alloc.dupeSentinel(u8, cmd, 0) catch return null;
     return jni.newStringUtf(env, z.ptr);
 }
 

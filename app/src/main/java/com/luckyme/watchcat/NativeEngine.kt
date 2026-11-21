@@ -9,6 +9,8 @@ package com.luckyme.watchcat
  * 所以这个对象必须叫 `NativeEngine`，且这八个方法名不能再改 —— 改任一边都只会得到
  * `No implementation found for ...`（那不是加载失败，是符号对不上）。
  *
+ * 注意：`nativeModeName` 已下线（导出名额 8/8 用满），五态文案改由界面层维护。
+ *
  * 用 `object` 而不是 companion，是为了让方法名不被 Kotlin 做任何名字修饰；
  * 原生侧第 2 个参数（jobject this / jclass）我们不使用，所以静态与非静态都成立。
  */
@@ -30,9 +32,6 @@ object NativeEngine {
     /** 自检：取 JVM 的 JNI 版本（0x00010006 表示 JNI 1.6 能力） */
     external fun nativeJniVersion(): Int
 
-    /** 五态编号 → 界面文案；越界返回 "?"，不抛异常 */
-    external fun nativeModeName(mode: Int): String
-
     /** 候选 op 表条数 */
     external fun nativeOpCount(): Int
 
@@ -51,4 +50,15 @@ object NativeEngine {
      * 时间戳由这里传入，是因为 .so 不链 libc 取不到系统时间，顺带换来快照可复现。
      */
     external fun nativeSnapshot(pkg: String?, raw: String?, stamp: String?): String?
+
+    /**
+     * 写单个 op：返回一条 `appops set` 命令，**由调用方拿到 root/Shizuku 权限后执行**。
+     *
+     * @param mode  0=默认 1=允许 2=忽略 3=拒绝 4=仅前台
+     * @param scope 0=包作用域 1=uid 作用域（uid 类 op 必须用 1，否则写的不是同一份状态）
+     *
+     * 名字里带空白/引号/分号/换行/非 ASCII 时一律返回 null —— 这条命令以 root 执行，
+     * 校验在 Zig 侧就做完了，调用方不要自己拼串。
+     */
+    external fun nativeWriteOp(pkg: String?, op: String?, mode: Int, scope: Int): String?
 }

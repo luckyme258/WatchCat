@@ -6,100 +6,198 @@ import android.os.Bundle
 import android.util.Log
 import android.widget.ScrollView
 import android.widget.TextView
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Locale
 
 /**
- * 空壳页面：验证 libwatchcat.so 在真机上能否被 System.loadLibrary 装载、
- * 六个 JNI 符号能否被解析、手写函数表偏移在 ART 上是否同样成立。
+ * 自检页：证明 Zig 引擎在真机上「装载 → 解析 → 快照 → 拼写命令」整条链是通的。
  *
- * 不申请权限、不联网、不落盘；结果同时写界面与 logcat（tag=WatchCat）。
+ * 两段执行：
+ *   1) 主线程：纯计算断言（不碰权限、不碰命令）；
+ *   2) 后台线程：root 探测 → 真读本应用自己的 appops → 读出文本交给 Zig 解析 → 真写一次再回读。
+ *
+ * 写操作只碰**本应用自己**的 CAMERA 这一个 op，并在 finally 里恢复成 default；
+ * 不留任何对外部应用的改动，root 弹窗只弹一次。
  */
 class MainActivity : Activity() {
+
+    private lateinit var tv: TextView
+    private val lines = StringBuilder()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        val sb = StringBuilder()
-        sb.append("设备 ").append(Build.MANUFACTURER).append(' ').append(Build.MODEL).append('\n')
-        sb.append("系统 Android ").append(Build.VERSION.RELEASE)
-            .append(" / API ").append(Build.VERSION.SDK_INT).append('\n')
-        sb.append("首选 ABI ").append(if (Build.SUPPORTED_ABIS.isNotEmpty()) Build.SUPPORTED_ABIS[0] else "?").append('\n')
-        sb.append("全部 ABI ").append(Build.SUPPORTED_ABIS.joinToString(", ")).append("\n\n")
+        append("设备 ${Build.MANUFACTURER} ${Build.MODEL}")
+        append("系统 Android ${Build.VERSION.RELEASE} / API ${Build.VERSION.SDK_INT}")
+        append("首选 ABI ${Build.SUPPORTED_ABIS.firstOrNull() ?: "?"}")
+        append("全部 ABI ${Build.SUPPORTED_ABIS.joinToString(", ")}")
+
+        val sample = "Uid mode: COARSE_LOCATION: ignore\nCAMERA: deny; time=+1d2h3m ago"
 
         try {
             val ver = NativeEngine.nativeVersion()
             val ping = NativeEngine.nativePing()
             val tag = NativeEngine.nativeTag()
             val jniVer = NativeEngine.nativeJniVersion()
-            val m2 = NativeEngine.nativeModeName(2)
-            val m9 = NativeEngine.nativeModeName(9)
             val ops = NativeEngine.nativeOpCount()
-
-            // 解析一项：把一小段 appops 输出丢进去，看 Zig 侧能否给出 JSON。
-            // 样本刻意包含「段头与条目同行」和「带 time 字段」两种真实形态。
-            val sample = "Uid mode: COARSE_LOCATION: ignore\nCAMERA: deny; time=+1d2h3m ago"
             val json = NativeEngine.nativeReadOps(sample)
-
-            // 快照一项：同一段输入 + 固定时间戳，产出应可复现且带校验和
-            val snap = NativeEngine.nativeSnapshot(
-                "com.luckyme.probe", sample, "2026-11-21T19:59:00+08:00"
-            )
+            val snap = NativeEngine.nativeSnapshot("com.luckyme.probe", sample, "2026-11-21T19:59:00+08:00")
+            val cmd = NativeEngine.nativeWriteOp("com.luckyme.probe", "CAMERA", MODE_DENY, SCOPE_PACKAGE)
+            val badCmd = NativeEngine.nativeWriteOp("com.x; rm -rf /", "CAMERA", MODE_DENY, SCOPE_PACKAGE)
 
             val ok = ver == 0x00010000 &&
                 ping == 0x5743 &&
                 "watchcat/0.1.0" == tag &&
                 jniVer >= 0x00010006 &&
-                "忽略（给空数据）" == m2 &&
-                "?" == m9 &&
                 ops > 0 &&
-                json != null &&
-                json.contains("\"count\":2") &&
-                json.contains("\"skipped\":0") &&
-                snap != null &&
-                snap.startsWith("# watchcat-snapshot v1") &&
-                snap.contains("# ops=2 skipped=0") &&
-                snap.contains("CAMERA\tdeny\tpackage") &&
-                snap.contains("# checksum=fnv1a64:")
+                json != null && json.contains("\"count\":2") && json.contains("\"skipped\":0") &&
+                snap != null && snap.startsWith("# watchcat-snapshot v1") && snap.contains("CAMERA\tdeny\tpackage") &&
+                cmd == "appops set --user current com.luckyme.probe CAMERA deny" &&
+                badCmd == null // 注入尝试必须被拒
 
-            sb.append(if (ok) "LOAD: PASS\n\n" else "LOAD: FAIL\n\n")
-            sb.append(String.format(Locale.US, "version    = 0x%08x%n", ver))
-            sb.append(String.format(Locale.US, "ping       = 0x%04x%n", ping))
-            sb.append("tag        = ").append(tag).append('\n')
-            sb.append(String.format(Locale.US, "jniVersion = 0x%x%n", jniVer))
-            sb.append("modeName(2)= ").append(m2).append('\n')
-            sb.append("modeName(9)= ").append(m9).append('\n')
-            sb.append("opCount    = ").append(ops).append('\n')
-            sb.append("readOps    = ")
-                .append(if (json == null) "null（解析失败）" else json).append('\n')
-            sb.append("snapshot   = ")
-                .append(if (snap == null) "null（快照失败）" else snap).append("\n\n")
-
-            Log.i(TAG, sb.toString().replace('\n', ' '))
+            append(if (ok) "LOAD: PASS" else "LOAD: FAIL")
+            append(String.format(Locale.US, "version    = 0x%08x", ver))
+            append(String.format(Locale.US, "jniVersion = 0x%x", jniVer))
+            append("opCount    = $ops")
+            append("modeLabel  = ${label(MODE_IGNORE)} / ${label(9)}")
+            append("readOps    = ${json ?: "null"}")
+            append("writeCmd   = ${cmd ?: "null"}")
+            append("injection  = ${if (badCmd == null) "已拦截（返回 null）" else "未拦截！ $badCmd"}")
+            append("snapshot   = ${snap ?: "null"}")
         } catch (e: Throwable) {
-            // 装不上 / 符号找不到 / 类初始化失败，都把真实原因带出来，不要只报「加载失败」
-            sb.append("LOAD: FAIL\n\n")
-            sb.append("${e.javaClass.name}:\n${e.message}\n\n")
-            var cause: Throwable? = e.cause
-            if (cause != null) {
-                sb.append("cause: ${cause.javaClass.name}: ${cause.message}\n\n")
+            append("LOAD: FAIL")
+            append("${e.javaClass.name}: ${e.message}")
+            e.cause?.let { append("cause: ${it.javaClass.name}: ${it.message}") }
+            append("常见原因：ABI 不匹配 / .so 未按 16KB 对齐或被压缩 / 类名与导出符号不一致。")
+            Log.e(TAG, "load failed", e)
+        }
+
+        render()
+        Thread { runRootPhase() }.apply { isDaemon = true; name = "watchcat-selfcheck" }.start()
+    }
+
+    /**
+     * 后台段：root → 真读 → 真写 → 回读。
+     * 所有异常都在这里吃掉并转成文字，绝不让线程崩掉把界面留空。
+     */
+    private fun runRootPhase() {
+        if (!Shell.hasSuBinary()) {
+            appendAsync("root       = 没装 su 二进制，只能走 Shizuku（未接入）")
+            return
+        }
+
+        val root = Shell.probeRoot()
+        appendAsync("root       = ${if (Shell.isRoot(root)) "OK（uid=0）" else "不可用：${root.output.trim().take(120)}"}")
+        if (!Shell.isRoot(root)) {
+            appendAsync("           首次会弹 Magisk 授权框；若已拒绝，去 Magisk「超级用户」里给本应用放行")
+            return
+        }
+
+        // 真读：解析器第一次吃「非样本」的真实输出
+        val read = Shell.su("appops get $SELF_PKG")
+        val realJson = runCatching { NativeEngine.nativeReadOps(read.output) }.getOrNull()
+        appendAsync("realRead   = exit=${read.code} ops=${countOf(realJson)} json=${realJson?.take(200) ?: "null"}")
+
+        // 真写：只动自己的 CAMERA，写完立刻回读，最后一定恢复 default
+        val stamp = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX", Locale.US).format(Date())
+        val before = NativeEngine.nativeSnapshot(SELF_PKG, read.output, stamp)
+        appendAsync("snapshot   = ${if (before == null) "失败（按规范此时不许写）" else "已生成 ${before.length} 字符"}")
+        if (before == null) return
+
+        val setCmd = NativeEngine.nativeWriteOp(SELF_PKG, "CAMERA", MODE_IGNORE, SCOPE_PACKAGE)
+        if (setCmd == null) {
+            appendAsync("writeOp    = 命令生成失败，已放弃写入")
+            return
+        }
+        try {
+            val w = Shell.su(setCmd)
+            appendAsync("write      = $setCmd -> exit=${w.code} ${w.output.trim().take(80)}")
+            val after = Shell.su("appops get $SELF_PKG")
+            val afterJson = runCatching { NativeEngine.nativeReadOps(after.output) }.getOrNull()
+            val got = modeIdOf(afterJson, "CAMERA")
+            appendAsync("readback   = CAMERA modeId=$got ${if (got == MODE_IGNORE) "（与期望一致）" else "（不一致！）"}")
+        } finally {
+            val restore = NativeEngine.nativeWriteOp(SELF_PKG, "CAMERA", MODE_DEFAULT, SCOPE_PACKAGE)
+            if (restore != null) {
+                val r = Shell.su(restore)
+                appendAsync("restore    = CAMERA -> default, exit=${r.code}")
             }
-            sb.append("常见原因：\n")
-                .append("1) ABI 不匹配（本机只有 arm64 库）；\n")
-                .append("2) .so 未按 16KB 对齐、或被压缩进 APK；\n")
-                .append("3) 类名/方法名与导出符号不一致（Java_com_luckyme_watchcat_NativeEngine_*）。\n")
-            Log.e(TAG, "load failed: ${e.javaClass.name}: ${e.message}", e)
         }
+    }
 
-        val tv = TextView(this).apply {
-            text = sb.toString()
-            textSize = 15f
-            setPadding(48, 96, 48, 48)
+    /** 从 JSON 里取某个 op 的 modeId，取不到返回 -1（不抛异常，自检页不能因为解析崩） */
+    private fun modeIdOf(json: String?, op: String): Int {
+        if (json == null) return -1
+        val i = json.indexOf("\"op\":\"$op\"")
+        if (i < 0) return -1
+        val j = json.indexOf("\"modeId\":", i)
+        if (j < 0) return -1
+        val start = j + "\"modeId\":".length
+        val end = json.indexOfFirst(start) { it == ',' || it == '}' }
+        return json.substring(start, end).trim().toIntOrNull() ?: -1
+    }
+
+    private fun countOf(json: String?): Int {
+        if (json == null) return -1
+        val k = "\"count\":"
+        val i = json.indexOf(k)
+        if (i < 0) return -1
+        val start = i + k.length
+        val end = json.indexOfFirst(start) { it == ',' || it == '}' }
+        return json.substring(start, end).trim().toIntOrNull() ?: -1
+    }
+
+    private inline fun String.indexOfFirst(from: Int, pred: (Char) -> Boolean): Int {
+        for (i in from until length) if (pred(this[i])) return i
+        return length
+    }
+
+    private fun label(mode: Int): String = MODE_LABELS[mode] ?: "?"
+
+    private fun append(s: String) {
+        lines.append(s).append('\n')
+    }
+
+    private fun appendAsync(s: String) {
+        Log.i(TAG, s)
+        runOnUiThread {
+            lines.append(s).append('\n')
+            render()
         }
+    }
 
-        setContentView(ScrollView(this).apply { addView(tv) })
+    private fun render() {
+        if (!::tv.isInitialized) {
+            tv = TextView(this).apply {
+                textSize = 13f
+                setPadding(40, 80, 40, 40)
+            }
+            setContentView(ScrollView(this).apply { addView(tv) })
+        }
+        tv.text = lines.toString()
+        Log.i(TAG, "render: ${lines.length} chars")
     }
 
     companion object {
         private const val TAG = "WatchCat"
+        private const val SELF_PKG = "com.luckyme.watchcat"
+
+        // 五态文案从 Zig 侧搬到界面层：nativeModeName 已下线（导出名额 8/8）
+        private const val MODE_DEFAULT = 0
+        private const val MODE_ALLOW = 1
+        private const val MODE_IGNORE = 2
+        private const val MODE_DENY = 3
+        private const val MODE_FOREGROUND = 4
+        private const val SCOPE_PACKAGE = 0
+        private const val SCOPE_UID = 1
+
+        private val MODE_LABELS = mapOf(
+            0 to "默认",
+            1 to "允许",
+            2 to "忽略（给空数据）",
+            3 to "拒绝（抛异常）",
+            4 to "仅前台允许",
+        )
     }
 }
