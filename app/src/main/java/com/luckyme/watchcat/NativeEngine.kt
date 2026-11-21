@@ -6,7 +6,7 @@ package com.luckyme.watchcat
  * 硬约束（《安卓开发规范》W7）：导出函数 ≤ 8 个，一个函数一个职责。
  *
  * **类名即符号名**：`.so` 里导出的是 `Java_com_luckyme_watchcat_NativeEngine_*`，
- * 所以这个对象必须叫 `NativeEngine`，且这七个方法名不能再改 —— 改任一边都只会得到
+ * 所以这个对象必须叫 `NativeEngine`，且这八个方法名不能再改 —— 改任一边都只会得到
  * `No implementation found for ...`（那不是加载失败，是符号对不上）。
  *
  * 用 `object` 而不是 companion，是为了让方法名不被 Kotlin 做任何名字修饰；
@@ -43,4 +43,12 @@ object NativeEngine {
      * 也不需要 .so 链 libc 或 fork。null 入参或内存不足时返回 null，调用方按「读失败」处理。
      */
     external fun nativeReadOps(raw: String?): String?
+
+    /**
+     * 写前快照：pkg + `appops get` 原始输出 + 时间戳（形如 `2026-11-21T20:05:11+08:00`）→ 文本。
+     *
+     * 返回 null 一律视为「快照没拿到」——按规范 W9，此时**不许执行任何写操作**。
+     * 时间戳由这里传入，是因为 .so 不链 libc 取不到系统时间，顺带换来快照可复现。
+     */
+    external fun nativeSnapshot(pkg: String?, raw: String?, stamp: String?): String?
 }

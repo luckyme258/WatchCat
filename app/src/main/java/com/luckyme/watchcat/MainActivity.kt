@@ -40,6 +40,11 @@ class MainActivity : Activity() {
             val sample = "Uid mode: COARSE_LOCATION: ignore\nCAMERA: deny; time=+1d2h3m ago"
             val json = NativeEngine.nativeReadOps(sample)
 
+            // 快照一项：同一段输入 + 固定时间戳，产出应可复现且带校验和
+            val snap = NativeEngine.nativeSnapshot(
+                "com.luckyme.probe", sample, "2026-11-21T19:59:00+08:00"
+            )
+
             val ok = ver == 0x00010000 &&
                 ping == 0x5743 &&
                 "watchcat/0.1.0" == tag &&
@@ -49,7 +54,12 @@ class MainActivity : Activity() {
                 ops > 0 &&
                 json != null &&
                 json.contains("\"count\":2") &&
-                json.contains("\"skipped\":0")
+                json.contains("\"skipped\":0") &&
+                snap != null &&
+                snap.startsWith("# watchcat-snapshot v1") &&
+                snap.contains("# ops=2 skipped=0") &&
+                snap.contains("CAMERA\tdeny\tpackage") &&
+                snap.contains("# checksum=fnv1a64:")
 
             sb.append(if (ok) "LOAD: PASS\n\n" else "LOAD: FAIL\n\n")
             sb.append(String.format(Locale.US, "version    = 0x%08x%n", ver))
@@ -60,7 +70,9 @@ class MainActivity : Activity() {
             sb.append("modeName(9)= ").append(m9).append('\n')
             sb.append("opCount    = ").append(ops).append('\n')
             sb.append("readOps    = ")
-                .append(if (json == null) "null（解析失败）" else json).append("\n\n")
+                .append(if (json == null) "null（解析失败）" else json).append('\n')
+            sb.append("snapshot   = ")
+                .append(if (snap == null) "null（快照失败）" else snap).append("\n\n")
 
             Log.i(TAG, sb.toString().replace('\n', ' '))
         } catch (e: Throwable) {

@@ -8,6 +8,7 @@
 //! 当前已实现（2026-11-21，真机 API 36 上 LOAD: PASS）：
 //!   nativeVersion / nativePing / nativeTag / nativeJniVersion / nativeModeName / nativeOpCount
 //!   nativeReadOps(raw)   —— 把 `appops get` 的原始输出解析成 JSON（真机样本 7/7 单测通过）
+//!   nativeSnapshot(pkg, raw, stamp) —— 写前快照，带 FNV-1a 64 校验和（11/11 单测通过）
 //!
 //! 待实现（对应规范 6 章的接口面，按需逐个补，不要一次全开）：
 //!   nativeReadOps(pkg)      -> 读全量 op（appops get 的解析结果）
@@ -20,6 +21,7 @@
 const std = @import("std");
 const jni = @import("jni.zig");
 const appops = @import("appops.zig");
+const snapshot = @import("snapshot.zig");
 
 /// 版本号，打包成 0x0001_0000 = 1.0.0。改版本要同步改 build 脚本里的说明。
 pub const version_packed: u32 = 0x0001_0000;
@@ -95,6 +97,41 @@ export fn Java_com_luckyme_watchcat_NativeEngine_nativeReadOps(env: jni.JNIEnv, 
     const json = appops.toJson(alloc, parsed) catch return null;
     // NewStringUTF 要 NUL 结尾；arena 每次调用都从头分配，不需要手动回收
     const z = alloc.dupeSentinel(u8, json, 0) catch return null;
+
+    return jni.newStringUtf(env, z.ptr);
+}
+
+/// 写前快照：pkg + `appops get` 原始输出 + 时间戳 → 可解析、带校验和的文本。
+///
+/// 时间戳由 Kotlin 传入（本库不链 libc，取不到系统时间；也让快照可复现）。
+/// 返回 null 表示失败，调用方**必须**当作「快照没拿到 → 不许写」处理。
+export fn Java_com_luckyme_watchcat_NativeEngine_nativeSnapshot(
+    env: jni.JNIEnv,
+    clazz: jni.jclass,
+    pkg: jni.jstring,
+    raw: jni.jstring,
+    stamp: jni.jstring,
+) callconv(.c) jni.jstring {
+    _ = clazz;
+
+    const pkg_obj = pkg orelse return null;
+    const pkg_chars = jni.getStringUtfChars(env, pkg_obj) orelse return null;
+    defer jni.releaseStringUtfChars(env, pkg_obj, pkg_chars);
+
+    const raw_obj = raw orelse return null;
+    const raw_chars = jni.getStringUtfChars(env, raw_obj) orelse return null;
+    defer jni.releaseStringUtfChars(env, raw_obj, raw_chars);
+
+    const stamp_obj = stamp orelse return null;
+    const stamp_chars = jni.getStringUtfChars(env, stamp_obj) orelse return null;
+    defer jni.releaseStringUtfChars(env, stamp_obj, stamp_chars);
+
+    var fba = std.heap.FixedBufferAllocator.init(&arena_buf);
+    const alloc = fba.allocator();
+
+    const parsed = appops.parseGet(alloc, std.mem.span(raw_chars)) catch return null;
+    const snap = snapshot.toSnapshot(alloc, parsed, std.mem.span(pkg_chars), std.mem.span(stamp_chars)) catch return null;
+    const z = alloc.dupeSentinel(u8, snap, 0) catch return null;
 
     return jni.newStringUtf(env, z.ptr);
 }
