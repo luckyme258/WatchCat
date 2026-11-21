@@ -53,6 +53,8 @@ android {
         }
         getByName("release") {
             isMinifyEnabled = false
+            // hook 侧关混淆（L7）：入口类名必须与 META-INF/xposed/java_init.list 一致
+            proguardFiles("proguard-rules.pro")
             signingConfigs.findByName("fixed")?.let { signingConfig = it }
         }
     }
@@ -61,6 +63,10 @@ android {
     packaging {
         jniLibs {
             useLegacyPackaging = false
+        }
+        // modern LSP 模块描述走 META-INF/xposed/，必须原样进 APK（L2）
+        resources {
+            merges += "META-INF/xposed/*"
         }
     }
 
@@ -71,5 +77,17 @@ android {
 
     kotlinOptions {
         jvmTarget = "17"
+    }
+}
+
+dependencies {
+    // L1：基线 API 101，不追 102。API 只在编译期可见，运行时由框架注入。
+    // 这两个 AAR 的 POM 声明了 kotlin-stdlib 2.2.10（源码本身是纯 Java），
+    // 与本项目的 Kotlin 2.1.0 冲突，所以排除；不排除会把 stdlib 顶到 2.2.10。
+    compileOnly("io.github.libxposed:api:101.0.0") {
+        exclude(group = "org.jetbrains.kotlin")
+    }
+    implementation("io.github.libxposed:service:101.0.0") {
+        exclude(group = "org.jetbrains.kotlin")
     }
 }

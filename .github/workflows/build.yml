@@ -123,6 +123,17 @@ jobs:
       - name: 组装 debug APK
         run: gradle :app:assembleDebug --no-daemon --stacktrace
 
+      # P1 闸门：模块描述必须真的进 APK，否则 Vector 会把它当普通应用
+      - name: 校验 LSP 模块描述
+        run: |
+          APK=app/build/outputs/apk/debug/app-debug.apk
+          for f in META-INF/xposed/module.prop META-INF/xposed/java_init.list META-INF/xposed/scope.list; do
+            unzip -Z1 "$APK" | grep -qx "$f" || { echo "::error::missing $f"; exit 1; }
+          done
+          unzip -p "$APK" META-INF/xposed/module.prop
+          unzip -p "$APK" META-INF/xposed/java_init.list
+          unzip -p "$APK" META-INF/xposed/scope.list
+
       # 模块包和 APK 同一次构建产出：用户拿到的「控制台 + 模块」必须来自同一个 commit，
       # 否则配置协议对不上时很难判断是哪一头旧了。
       - name: 打 Zygisk 模块包

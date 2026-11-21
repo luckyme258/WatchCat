@@ -6,6 +6,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import io.github.libxposed.api.XposedInterface
 
 /**
  * 诊断页：把「这台机器到底能干什么」摊在明面上（W8.3 / W15-C12）。
@@ -17,6 +18,7 @@ class DiagScreen(private val act: MainActivity) {
 
     private val root = Ui.col(act)
     private val identityText = Ui.tv(act, "检测中…", 12f, Ui.MUTED)
+    private val frameworkText = Ui.tv(act, "读取中…", 12f, Ui.MUTED)
     private val engineText = Ui.tv(act, "读取中…", 12f, Ui.MUTED)
     private val capText = Ui.tv(act, "尚未跑过本轮探测。上次结果见 files/capability_v2.json。", 11.5f, Ui.MUTED)
     private val capRows = Ui.col(act)
@@ -48,6 +50,13 @@ class DiagScreen(private val act: MainActivity) {
         idBtns.addView(Ui.button(act, "重新检测") { act.refreshIdentity(); refreshEngine() })
         idCard.addView(idBtns)
         body.addView(idCard)
+        body.addView(Ui.spacer(act, 10))
+
+        // LSP 框架接入（P1）：能读到的现读，读不到一律“未知”，不猜版本
+        val fwCard = Ui.card(act)
+        fwCard.addView(Ui.tv(act, "LSP 框架接入（P1）", 14.5f, Ui.TEXT, bold = true))
+        fwCard.addView(frameworkText)
+        body.addView(fwCard)
         body.addView(Ui.spacer(act, 10))
 
         // 引擎
@@ -97,9 +106,11 @@ class DiagScreen(private val act: MainActivity) {
 
     fun refreshEngine() {
         identityText.text = "检测中…"
+        frameworkText.text = "读取中…"
         engineText.text = "读取中…"
         act.bg {
             val id = Engine.identityText()
+            val fw = frameworkReport()
             val eng = buildString {
                 try {
                     val ver = NativeEngine.nativeVersion()
@@ -115,9 +126,59 @@ class DiagScreen(private val act: MainActivity) {
             act.ui {
                 identityText.text = id
                 identityText.setTextColor(if (id.startsWith("root")) Ui.ACCENT else Ui.WARN)
+                frameworkText.text = fw.text
+                frameworkText.setTextColor(fw.color)
                 engineText.text = eng
             }
         }
+    }
+
+    private data class FrameworkReport(val text: String, val color: Int)
+
+    /**
+     * 注入证据只认两处：框架服务能读到的状态，或 system_server 写下的 marker。
+     * marker 写不进去（SELinux）就如实说“未找到”，不要拿“应该已注入”糊弄。
+     */
+    private fun frameworkReport(): FrameworkReport {
+        val snap = FrameworkState.snapshot()
+        val channel = if (PolicyStore.isRemote()) {
+            "remote preferences（框架托管）"
+        } else {
+            "本地回退（框架未连接）"
+        }
+        val marker = Shell.su("cat /data/adb/watchcat/system_server.marker 2>/dev/null", 3_000)
+        val markerText = if (marker.ok && marker.output.isNotBlank()) {
+            marker.output.lineSequence().filter { it.isNotBlank() }.take(4).joinToString(" · ")
+        } else {
+            "未找到（需 root 读或看 logcat -s WatchCat）"
+        }
+
+        if (snap == null) {
+            return FrameworkReport(
+                "框架服务：未连接 / 未知\n" +
+                    "框架：未知（不猜版本）\n" +
+                    "作用域：未知\n" +
+                    "策略通道：$channel\n" +
+                    "注入：$markerText",
+                Ui.WARN,
+            )
+        }
+
+        val props = snap.properties
+        fun cap(bit: Long) = if ((props and bit) != 0L) "✓" else "—"
+        val caps = "system=${cap(XposedInterface.PROP_CAP_SYSTEM)} " +
+            "remote=${cap(XposedInterface.PROP_CAP_REMOTE)} " +
+            "apiProtection=${cap(XposedInterface.PROP_RT_API_PROTECTION)}"
+        val scope = snap.scope.ifEmpty { listOf("（空）") }.joinToString(", ")
+        return FrameworkReport(
+            "框架服务：已连接\n" +
+                "框架：${snap.name} ${snap.version}（versionCode ${snap.versionCode}）· API ${snap.api}\n" +
+                "能力：$caps\n" +
+                "作用域：$scope\n" +
+                "策略通道：$channel\n" +
+                "注入：$markerText",
+            if (snap.api >= 101) Ui.ACCENT else Ui.WARN,
+        )
     }
 
     private fun runCapability() {
