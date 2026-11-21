@@ -2,7 +2,7 @@ name: build
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, p1-libxposed ]
     tags: [ 'v*' ]
   workflow_dispatch:
 
