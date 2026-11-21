@@ -110,6 +110,9 @@ def build_engine(zig, target, out_path):
         "-O", "ReleaseSmall",
         "-femit-bin=" + out_path,
         "-static",
+        # 静态库要进 shim 那个共享库，必须 PIC：否则 lld 报
+        # `relocation R_AARCH64_ADR_PREL_PG_HI21 cannot be used ...`
+        "-fPIC",
         "-fno-emit-implib",
     ]
     t0 = time.time()

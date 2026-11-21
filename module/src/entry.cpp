@@ -40,7 +40,6 @@ uint32_t wc_engine_ping(void);
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN, TAG, __VA_ARGS__)
 
-static const char *kStateDir = "/data/adb/watchcat";
 static const char *kArmFile = "/data/adb/watchcat/armed";
 static const char *kProbeFile = "/data/adb/watchcat/p0.probe";
 

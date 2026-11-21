@@ -112,6 +112,7 @@ def compile_one(ndk, triple, abi_dir, out_path):
         "-O2",
         # 关掉异常和 RTTI：这个 .so 在 system_server 里跑，任何 new/throw 都是多余的失败面
         "-fno-exceptions", "-fno-rtti",
+        "-fPIC",                       # 共享库必须 PIC，不加会出 relocation 报错
         "-ffunction-sections", "-fdata-sections",
         "-Wall", "-Wextra", "-Wno-unused-parameter",
         "-I", SRC_DIR,
