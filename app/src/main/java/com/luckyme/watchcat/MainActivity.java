@@ -17,17 +17,6 @@ public class MainActivity extends Activity {
 
     private static final String TAG = "WatchCat";
 
-    static {
-        System.loadLibrary("watchcat");
-    }
-
-    private static native int nativeVersion();
-    private static native int nativePing();
-    private static native String nativeTag();
-    private static native int nativeJniVersion();
-    private static native String nativeModeName(int mode);
-    private static native int nativeOpCount();
-
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -40,13 +29,13 @@ public class MainActivity extends Activity {
         sb.append("全部 ABI ").append(String.join(", ", Build.SUPPORTED_ABIS)).append("\n\n");
 
         try {
-            int ver = nativeVersion();
-            int ping = nativePing();
-            String tag = nativeTag();
-            int jniVer = nativeJniVersion();
-            String m2 = nativeModeName(2);
-            String m9 = nativeModeName(9);
-            int ops = nativeOpCount();
+            int ver = NativeEngine.nativeVersion();
+            int ping = NativeEngine.nativePing();
+            String tag = NativeEngine.nativeTag();
+            int jniVer = NativeEngine.nativeJniVersion();
+            String m2 = NativeEngine.nativeModeName(2);
+            String m9 = NativeEngine.nativeModeName(9);
+            int ops = NativeEngine.nativeOpCount();
 
             boolean ok = ver == 0x00010000
                     && ping == 0x5743
