@@ -25,8 +25,23 @@ public final class WatchCatModule extends XposedModule {
     private static final String TAG = "WatchCat";
     private static final String STATE_DIR = "/data/adb/watchcat";
 
+    // 排障用：Vector 的 log() 写它自己的日志文件，抓不到就等于没有。
+    // 这里直连 android.util.Log，只打一行"我到过这里"，用来区分
+    // 「回调没被调用」和「log() 没落盘」这两种完全不同的故障。
+    private static void raw(String s) {
+        try {
+            Log.i("WatchCatP1", s + " pid=" + Process.myPid());
+        } catch (Throwable ignored) {
+        }
+    }
+
+    public WatchCatModule() {
+        raw("ctor");
+    }
+
     @Override
     public void onModuleLoaded(ModuleLoadedParam param) {
+        raw("onModuleLoaded");
         try {
             final boolean system = param.isSystemServer();
             log(Log.INFO, TAG, "p1: module loaded process=" + param.getProcessName()
@@ -45,6 +60,7 @@ public final class WatchCatModule extends XposedModule {
 
     @Override
     public void onSystemServerStarting(SystemServerStartingParam param) {
+        raw("onSystemServerStarting");
         try {
             log(Log.INFO, TAG, "p1: onSystemServerStarting pid=" + Process.myPid()
                     + " classLoader=" + param.getClassLoader()
