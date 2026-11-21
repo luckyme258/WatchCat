@@ -136,7 +136,10 @@ def main():
     print("[1/6] 编译 Java")
     sources = collect_java(JAVA_SRC)
     if not sources:
-        raise SystemExit("没有 .java 源文件")
+        raise SystemExit(
+            "没有 .java 源文件 —— 空壳已迁到 Kotlin，正式构建走 `gradle :app:assembleDebug`。\n"
+            "本脚本只保留为「Java 时代」的本机对照工具；Kotlin 代码它编不了（不依赖 kotlinc）。"
+        )
     run([os.path.join(JDK, "bin", "javac.exe"), "-source", "8", "-target", "8",
          "-Xlint:-options", "-bootclasspath", PLATFORM_JAR,
          "-encoding", "UTF-8", "-d", os.path.join(WORK, "classes"), *sources], what="javac")

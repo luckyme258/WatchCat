@@ -11,6 +11,11 @@ LOCAL-SYSTEM-GUIDE.md.bak
 # 本地产物与中间件
 /apk/
 /build/
+/app/build/
+/.gradle/
+/.kotlin/
+local.properties
+*.iml
 *.apk
 *.idsig
 *.dump.txt
@@ -36,4 +41,4 @@ Thumbs.db
 .DS_Store
 
 # 说明：app/src/main/jniLibs 下的 .so 是刻意入库的（约 3KB），
-# 这样 CI 不装 Zig 也能直接打 APK；是否改为 CI 现编，见规范第 20 章待收敛项。
+# 这样 CI 不装 Zig 也能直接打 APK；是否改为 CI 现编，见规范 W16 待收敛项第 9 条。

@@ -1,0 +1,100 @@
+name: build
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  workflow_dispatch:
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    # 只有打 tag 发 Release 时才需要写权限；平时用不到的权限就别给。
+    permissions:
+      contents: write
+
+    steps:
+      - name: 取代码
+        uses: actions/checkout@v4
+
+      - name: JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: 装 platform 36 + build-tools 36（compileSdk 36 需要）
+        run: |
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # 与本地同源：PyPI 的 ziglang 包，版本钉死 0.17.1（规范 W13）
+      - name: 装 Zig 0.17.1
+        run: |
+          python -m pip install --no-cache-dir ziglang==0.17.1
+          ZIG=$(python -c "import os,ziglang;print(os.path.join(os.path.dirname(ziglang.__file__),'zig'))")
+          chmod +x "$ZIG" 2>/dev/null || true
+          echo "ZIG=$ZIG" >> "$GITHUB_ENV"
+          "$ZIG" version
+
+      - name: 编译 .so（脚本内含对齐门禁）
+        run: python tools/build_so.py
+
+      - name: 独立复核 ELF（架构 / 16KB 对齐 / 符号 / 依赖）
+        run: |
+          python tools/elfcheck.py \
+            app/src/main/jniLibs/arm64-v8a/libwatchcat.so \
+            app/src/main/jniLibs/x86_64/libwatchcat.so
+
+      # 签名必须与本地同源，否则 install -r 报 INSTALL_FAILED_UPDATE_INCOMPATIBLE。
+      # 有 Secret 就用本地那份；没有就临时生成，并在产物名和摘要里标出来。
+      - name: 准备签名
+        id: ks
+        env:
+          KS_B64: ${{ secrets.WATCHCAT_KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KS_B64" ]; then
+            printf '%s' "$KS_B64" | base64 -d > "$RUNNER_TEMP/debug.keystore"
+            echo "WATCHCAT_KEYSTORE=$RUNNER_TEMP/debug.keystore" >> "$GITHUB_ENV"
+            echo "name=" >> "$GITHUB_OUTPUT"
+            echo "**签名：与本地同一份密钥（Secret 注入）**" >> "$GITHUB_STEP_SUMMARY"
+          else
+            keytool -genkeypair -keystore "$RUNNER_TEMP/ci-debug.keystore" -storetype PKCS12 \
+              -storepass android -keypass android -alias androiddebugkey \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+            echo "WATCHCAT_KEYSTORE=$RUNNER_TEMP/ci-debug.keystore" >> "$GITHUB_ENV"
+            echo "name=-ci" >> "$GITHUB_OUTPUT"
+            echo "**签名：CI 临时密钥 —— 与本地不同，装机前需卸载旧包**" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Gradle 8.13
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+
+      - name: 组装 debug APK
+        run: gradle :app:assembleDebug --no-daemon --stacktrace
+
+      - name: 上传 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: watchcat-debug${{ steps.ks.outputs.name }}
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: 发布到 Release（仅打 tag 时）
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: app/build/outputs/apk/debug/*.apk

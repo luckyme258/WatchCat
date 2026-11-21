@@ -1,13 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- 空壳 APK：只用来验证 libwatchcat.so 能不能被装载、JNI 能不能解析。
-     不申请任何权限，不联网，没有持久化。加载失败会直接把原因显示在界面上。 -->
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.luckyme.watchcat">
+     不申请任何权限，不联网，没有持久化。加载失败会直接把原因显示在界面上。
+     注意：AGP 8 起 package 由 build.gradle.kts 的 namespace 提供，这里不能再写 package 属性。 -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <application
         android:label="WatchCat 空壳"
-        android:hasCode="true"
-        android:extractNativeLibs="false">
+        android:hasCode="true">
 
         <activity
             android:name=".MainActivity"
