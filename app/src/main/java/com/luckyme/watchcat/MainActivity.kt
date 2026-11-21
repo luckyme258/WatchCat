@@ -22,7 +22,8 @@ import java.util.Locale
  *   - `appops get` 里 uid 段与包段在文本上无法区分，必须先用 `appops get --uid <uid>` 数行数；
  *   - 回读必须**按作用域**比对，否则会把 uid 段的同名 op 当成自己的写入结果（自欺）。
  *
- * 写操作只碰**本应用自己**的 VIBRATE（MIUI 上 CAMERA 被系统接管，写进去读不回来，用它验不住），
+ * 写操作只碰**本应用自己**的 VIBRATE（2026-11-21 在本机实测：CAMERA / RECORD_AUDIO 这类
+ * 权限型 op，`appops set` 返回 rc=0 却完全不生效，写进去读不回来，拿它验不住），
  * 并在 finally 里恢复 default，不留对外部应用的改动。
  */
 class MainActivity : Activity() {
@@ -111,7 +112,8 @@ class MainActivity : Activity() {
         appendAsync("snapshot   = ${if (before == null) "失败（按规范此时不许写）" else "已生成 ${before.length} 字符"}")
         if (before == null) return
 
-        // 真写：VIBRATE（包作用域）。CAMERA 在 MIUI 上被系统接管，写不改、读不回，拿它验不住。
+        // 真写：VIBRATE（包作用域）。权限型 op（CAMERA / RECORD_AUDIO）在本机实测「rc=0 但不生效」，
+        // 用它做写入验证只会得到假阳性，所以选一条确定可写、可读回的普通 op。
         val setCmd = NativeEngine.nativeWriteOp(SELF_PKG, WRITE_OP, MODE_DENY, SCOPE_PACKAGE)
         if (setCmd == null) {
             appendAsync("writeOp    = 命令生成失败，已放弃写入")
