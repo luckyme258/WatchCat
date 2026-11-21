@@ -112,6 +112,9 @@ def compile_one(ndk, triple, abi_dir, out_path):
         "-O2",
         # 关掉异常和 RTTI：这个 .so 在 system_server 里跑，任何 new/throw 都是多余的失败面
         "-fno-exceptions", "-fno-rtti",
+        # 必须静态链 libc++：默认会 DT_NEEDED libc++_shared.so，而设备上只有 /system/lib64/libc++.so，
+        # 没有 libc++_shared.so（apk 自带也不会进 system_server 的 linker namespace）→ 注入即静默失败。
+        "-static-libstdc++",
         "-fPIC",                       # 共享库必须 PIC，不加会出 relocation 报错
         "-ffunction-sections", "-fdata-sections",
         "-Wall", "-Wextra", "-Wno-unused-parameter",
@@ -140,6 +143,15 @@ def check(ndk, out_path, expect_arch):
         print("    " + line)
     if not passed:
         return False, "16KB 门禁未通过"
+
+    # 动态依赖门禁：libc++_shared.so 在设备上不存在，一旦 DT_NEEDED 带上它，
+    # 模块在 app/system_server 的 linker namespace 里解析不到 → 注入静默失败（已踩过）。
+    needed = ""
+    for line in lines:
+        if line.strip().startswith("DT_NEEDED"):
+            needed = line.split(":", 1)[1]
+    if "libc++_shared" in needed:
+        return False, "DT_NEEDED 含 libc++_shared.so（设备上没有这个库），必须 -static-libstdc++"
 
     prebuilt = os.path.join(ndk, "toolchains", "llvm", "prebuilt", host_tag())
     readelf = os.path.join(prebuilt, "bin", "llvm-readelf")
