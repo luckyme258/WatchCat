@@ -26,8 +26,18 @@ object NativeEngine {
     /** 冒烟：不看参数，只证明调用链通了，固定返回 0x5743 */
     external fun nativePing(): Int
 
-    /** 冒烟：证明 Zig 侧能造 Java 字符串，返回 watchcat/0.1.0 */
-    external fun nativeTag(): String
+    /** 冒烟：证明调用链通了，固定返回 0x5743 */
+    external fun nativePing(): Int
+
+    /**
+     * 能力表判定：把一轮探测的事实行（`OP \t scope \t beforeId \t wantId \t afterId`）丢进来，
+     * 返回 `{"total","writable","notWritable","partial","channel","rows":[…]}`。
+     *
+     * 为什么判定不放在 Kotlin：AppOps 有三条通道（appop / 运行时权限 / 根本不支持），
+     * 权限型 op 在 Android 15+ 上是被 `AppOpService.setPackageMode` 丢弃的（见规范 W8.3），
+     * 这层知识属于引擎，界面只该拿 `advice` 画灯。
+     */
+    external fun nativeCapability(pkg: String?, stamp: String?, probe: String?): String?
 
     /** 自检：取 JVM 的 JNI 版本（0x00010006 表示 JNI 1.6 能力） */
     external fun nativeJniVersion(): Int

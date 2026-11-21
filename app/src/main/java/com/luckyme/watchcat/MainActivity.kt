@@ -14,9 +14,10 @@ import java.util.Locale
 /**
  * 自检页：证明 Zig 引擎在真机上「装载 → 解析 → 快照 → 拼写命令 → 写入 → 回读校验」整条链是通的。
  *
- * 两段执行：
+ * 三段执行：
  *   1) 主线程：纯计算断言（不碰权限、不碰命令）；
- *   2) 后台线程：root 探测 → 数 uid 段行数 → 真读本应用 appops → 交给 Zig 解析 → 真写一次 → 按作用域回读 → 恢复。
+ *   2) 后台线程：root 探测 → 数 uid 段行数 → 真读本应用 appops → 交给 Zig 解析 → 真写一次 → 按作用域回读 → 恢复；
+ *   3) 后台线程：能力探测 —— 逐条 op 试写 ignore 并回读，结论交给 Zig 判定，落盘 capability_v1.json。
  *
  * 两条在真机上踩出来的规矩（已写进 appops / writecmd 的注释）：
  *   - `appops get` 里 uid 段与包段在文本上无法区分，必须先用 `appops get --uid <uid>` 数行数；
@@ -43,7 +44,6 @@ class MainActivity : Activity() {
         try {
             val ver = NativeEngine.nativeVersion()
             val ping = NativeEngine.nativePing()
-            val tag = NativeEngine.nativeTag()
             val jniVer = NativeEngine.nativeJniVersion()
             val ops = NativeEngine.nativeOpCount()
             // 这份样本：1 条 uid 段 + 1 条包段
@@ -54,7 +54,6 @@ class MainActivity : Activity() {
 
             val ok = ver == 0x00010000 &&
                 ping == 0x5743 &&
-                "watchcat/0.1.0" == tag &&
                 jniVer >= 0x00010006 &&
                 ops > 0 &&
                 json != null && json.contains("\"count\":2") && json.contains("\"skipped\":0") &&
@@ -132,6 +131,49 @@ class MainActivity : Activity() {
                 appendAsync("restore    = ${WRITE_OP} -> default, exit=${r.code}, 回读 modeId=$got")
             }
         }
+
+        runCapabilityPhase(uid)
+    }
+
+    /**
+     * 能力探测段：只探本应用自己，每探一条立刻恢复原值。
+     * 结论由 Zig 侧（nativeCapability）判定，这里只负责画出来。
+     */
+    private fun runCapabilityPhase(uid: Int) {
+        val report = runCatching { CapabilityProbe.run(this, uid, SELF_PKG) }.getOrNull()
+        if (report == null) {
+            appendAsync("capability = 探测失败（异常或引擎返回 null）")
+            return
+        }
+
+        val rows = report.rows
+        val writable = rows.count { it.verdict == "writable" }
+        val notWritable = rows.count { it.verdict == "not_writable" }
+        val appop = rows.count { it.channel == "appop" }
+        val perm = rows.count { it.channel == "permission" }
+        appendAsync("capability = ${rows.size} 条：可写 $writable / 写不进 $notWritable；通道 appop $appop / permission $perm")
+
+        // 可写的挑出来给人看（这才是界面能画开关的那批）
+        rows.filter { it.verdict == "writable" }.take(6).forEach {
+            appendAsync("cap-ok     = ${it.op}(${it.scope}) ${label(it.before)}→${label(it.after)}")
+        }
+        // 权限型且写不进的，必须明确指向权限通道，别让人以为是坏开关
+        rows.firstOrNull { it.verdict == "not_writable" && it.channel == "permission" }?.let {
+            appendAsync("cap-note   = ${it.op}(${it.scope}) 写不进 → ${adviceText(it.advice)}")
+        }
+        // 只读的非权限型（本机就是不认这次写入）
+        rows.firstOrNull { it.verdict == "not_writable" && it.channel == "appop" }?.let {
+            appendAsync("cap-note   = ${it.op}(${it.scope}) 写不进 → ${adviceText(it.advice)}")
+        }
+        appendAsync("cap-file   = ${report.savedPath ?: "未落盘"}")
+    }
+
+    private fun adviceText(advice: String): String = when (advice) {
+        "use_permission_channel" -> "走 pm revoke/grant（权限通道）"
+        "readonly" -> "本机只读，界面上灰掉"
+        "unsupported" -> "本机没这条 op"
+        "recheck" -> "回读与期望不符，要人工复核"
+        else -> advice
     }
 
     /** 重新读一遍，按作用域取某个 op 的 modeId；-1 表示没找到（可能压根没这条记录） */

@@ -6,18 +6,17 @@
 //!   - 导出给 JVM 的函数**不超过 8 个**，一个函数一个职责；禁止在这里做 UI 或弹窗。
 //!
 //! 当前已实现（2026-11-21，真机 API 36 上 LOAD: PASS）：
-//!   nativeVersion / nativePing / nativeTag / nativeJniVersion / nativeOpCount
+//!   nativeVersion / nativePing / nativeJniVersion / nativeOpCount
 //!   nativeReadOps(raw)   —— 把 `appops get` 的原始输出解析成 JSON（真机样本 7/7 单测通过）
 //!   nativeSnapshot(pkg, raw, stamp) —— 写前快照，带 FNV-1a 64 校验和（11/11 单测通过）
 //!   nativeWriteOp(pkg, op, mode, scope) —— 拼 `appops set` 命令（含白名单校验，12/12 通过）
+//!   nativeCapability(pkg, stamp, probe) —— 能力表判定：写得进 / 写不进 / 该走哪条通道
 //!
-//! 已按规范 W7「导出 ≤ 8 个」用满上限：nativeModeName 已下线（五态文案归 Kotlin 界面层）。
+//! 已按规范 W7「导出 ≤ 8 个」用满上限：nativeModeName 已下线（五态文案归 Kotlin 界面层），
+//! nativeTag（纯 JNI 造串演示）让位给 nativeCapability。
 //!
 //! 待实现（对应规范 6 章的接口面，按需逐个补，不要一次全开）：
-//!   nativeReadOps(pkg)      -> 读全量 op（appops get 的解析结果）
-//!   nativeWriteOp(pkg, op, mode) -> 写单个 op，返回是否回读一致
-//!   nativeSnapshot()        -> 生成快照文本（写操作前必调）
-//!   nativeProbe()           -> 能力探测，产出本机 op 能力表
+//!   nativePlanProbe()       -> 由候选 op 表生成探测计划（哪些 op、哪个作用域、试哪一档）
 //!
 //! 依赖：只用 libc 之下的 syscall/内存操作，不链 libc、不拖任何 .so（见 elfcheck 输出）。
 
@@ -26,6 +25,7 @@ const jni = @import("jni.zig");
 const appops = @import("appops.zig");
 const snapshot = @import("snapshot.zig");
 const writecmd = @import("writecmd.zig");
+const capability = @import("capability.zig");
 
 /// 版本号，打包成 0x0001_0000 = 1.0.0。改版本要同步改 build 脚本里的说明。
 pub const version_packed: u32 = 0x0001_0000;
@@ -48,10 +48,46 @@ export fn Java_com_luckyme_watchcat_NativeEngine_nativePing(env: jni.JNIEnv, cla
     return 0x5743; // "WC"
 }
 
-/// 冒烟用：证明 Zig 能造 Java 字符串
-export fn Java_com_luckyme_watchcat_NativeEngine_nativeTag(env: jni.JNIEnv, clazz: jni.jclass) callconv(.c) jni.jstring {
+/// 能力表：Kotlin 跑完一轮探测后，把事实行（op/作用域/写前/期望/写后）丢进来，
+/// 这里判定「写得进 / 写不进」，并给出该走哪条通道（appop 还是 pm 权限通道）。
+///
+/// 输入格式见 capability.zig 头部注释：每行 `OP \t scope \t beforeId \t wantId \t afterId`。
+/// 为什么判定放在这里而不是 Kotlin：三条通道的语义差异是引擎知识（W8.3），
+/// 界面层只该拿结论画灯，不该自己重新推断一遍。
+export fn Java_com_luckyme_watchcat_NativeEngine_nativeCapability(
+    env: jni.JNIEnv,
+    clazz: jni.jclass,
+    pkg: jni.jstring,
+    stamp: jni.jstring,
+    probe: jni.jstring,
+) callconv(.c) jni.jstring {
     _ = clazz;
-    return jni.newStringUtf(env, "watchcat/0.1.0");
+
+    const pkg_obj = pkg orelse return null;
+    const pkg_chars = jni.getStringUtfChars(env, pkg_obj) orelse return null;
+    defer jni.releaseStringUtfChars(env, pkg_obj, pkg_chars);
+
+    const stamp_obj = stamp orelse return null;
+    const stamp_chars = jni.getStringUtfChars(env, stamp_obj) orelse return null;
+    defer jni.releaseStringUtfChars(env, stamp_obj, stamp_chars);
+
+    const probe_obj = probe orelse return null;
+    const probe_chars = jni.getStringUtfChars(env, probe_obj) orelse return null;
+    defer jni.releaseStringUtfChars(env, probe_obj, probe_chars);
+
+    var fba = std.heap.FixedBufferAllocator.init(&arena_buf);
+    const alloc = fba.allocator();
+
+    var parsed = capability.parseProbe(alloc, std.mem.span(probe_chars)) catch return null;
+    defer parsed.deinit(alloc);
+
+    const json = capability.toJson(alloc, parsed, .{
+        .pkg = std.mem.span(pkg_chars),
+        .stamp = std.mem.span(stamp_chars),
+    }) catch return null;
+    const z = alloc.dupeSentinel(u8, json, 0) catch return null;
+
+    return jni.newStringUtf(env, z.ptr);
 }
 
 /// 自检：取 JVM 的 JNI 版本，确认函数表偏移没错
