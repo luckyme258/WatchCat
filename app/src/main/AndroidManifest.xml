@@ -4,6 +4,15 @@
      注意：AGP 8 起 package 由 build.gradle.kts 的 namespace 提供，这里不能再写 package 属性。 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- 自有靶子：这 3 个权限只用于「在本应用身上闭环验证通道」——
+         pm revoke → 回读 granted → pm grant 还原，不碰用户其他应用。
+         它们不参与产品功能：CAMERA 不真调相机、SYSTEM_ALERT_WINDOW 不画悬浮窗、
+         POST_NOTIFICATIONS 不发通知，只让探测有东西可改。
+         将来做真功能时再按需调整，别顺手删（删了权限通道就退回「空转」）。 -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
     <application
         android:label="WatchCat 空壳"
         android:hasCode="true">

@@ -170,6 +170,14 @@ class MainActivity : Activity() {
         rows.filter { it.verdict == "partial" }.take(3).forEach {
             appendAsync("cap-check  = ${it.op}(${it.scope}) 试写 ${label(it.want)} 后回读 ${label(it.after)}（原 ${label(it.before)}）")
         }
+
+        // appops 之外的两条通道：权限（pm）与网络/设备（svc / cmd netpolicy）
+        report.channels.forEach { c ->
+            val tag = if (c.channel == "permission") "perm" else "net "
+            appendAsync("chan-$tag   = ${c.target} ${c.before}→${c.want}（实得 ${c.after}）${c.verdict}" +
+                if (c.note.isBlank()) "" else " ｜ ${c.note.take(70)}")
+        }
+
         appendAsync("cap-file   = ${report.savedPath ?: "未落盘"}")
     }
 

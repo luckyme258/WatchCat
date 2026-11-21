@@ -47,6 +47,7 @@ object CapabilityProbe {
         val json: String?,
         val probeText: String,
         val rows: List<Row>,
+        val channels: List<ChannelProbe.Row>,
         val savedPath: String?,
     )
 
@@ -106,11 +107,58 @@ object CapabilityProbe {
         }
 
         val json = NativeEngine.nativeCapability(pkg, stamp, probeLines.toString())
-        val saved = json?.let { save(ctx, it) }
+        // appops 之外的两条通道：权限（pm）与网络/设备（svc / cmd netpolicy）
+        val channels = runCatching { ChannelProbe.probePermissions(pkg) }.getOrDefault(emptyList()) +
+            runCatching { ChannelProbe.probeNetwork(uid) }.getOrDefault(emptyList())
+
+        val v2 = buildV2Json(pkg, uid, stamp, json, channels)
+        val saved = save(ctx, json, v2)
 
         // 把 Zig 侧的结论回填到行上：界面按行画灯，不再自己推断
         val judged = merge(rows, json)
-        return Report(json, probeLines.toString(), judged, saved)
+        return Report(json, probeLines.toString(), judged, channels, saved)
+    }
+
+    /**
+     * 能力表 v2：appops 行（Zig 判定）与 channel 行（Kotlin 判定，状态只有 true/false 或 1/0，不存在五态）
+     * 拼成一个文件，界面与诊断都只读这一份。
+     */
+    private fun buildV2Json(pkg: String, uid: Int, stamp: String, appopsJson: String?, channels: List<ChannelProbe.Row>): String {
+        val sb = StringBuilder()
+        sb.append("{\"v\":2,\"pkg\":\"").append(esc(pkg)).append("\",\"uid\":").append(uid)
+            .append(",\"stamp\":\"").append(esc(stamp)).append("\",\"appops\":")
+            .append(appopsJson ?: "null")
+            .append(",\"channels\":[")
+        channels.forEachIndexed { i, r ->
+            if (i > 0) sb.append(',')
+            sb.append("{\"channel\":\"").append(esc(r.channel))
+                .append("\",\"target\":\"").append(esc(r.target))
+                .append("\",\"before\":\"").append(esc(r.before))
+                .append("\",\"want\":\"").append(esc(r.want))
+                .append("\",\"after\":\"").append(esc(r.after))
+                .append("\",\"writeCmd\":\"").append(esc(r.writeCmd))
+                .append("\",\"readCmd\":\"").append(esc(r.readCmd))
+                .append("\",\"verdict\":\"").append(esc(r.verdict))
+                .append("\",\"note\":\"").append(esc(r.note)).append("\"}")
+        }
+        sb.append("]}")
+        return sb.toString()
+    }
+
+    /** 极简 JSON 转义：命令里会出现引号/反斜杠（比如 grep '$perm:'），不转义就会写出坏 JSON */
+    private fun esc(s: String): String {
+        val out = StringBuilder(s.length + 8)
+        for (c in s) {
+            when (c) {
+                '"' -> out.append("\\\"")
+                '\\' -> out.append("\\\\")
+                '\n' -> out.append("\\n")
+                '\r' -> out.append("\\r")
+                '\t' -> out.append("\\t")
+                else -> if (c < ' ') out.append(' ') else out.append(c)
+            }
+        }
+        return out.toString()
     }
 
     /** 读当前状态：op+scope → modeId。缺记录当 0（default），与「没有记录」的语义一致 */
@@ -140,12 +188,17 @@ object CapabilityProbe {
         }
     }
 
-    private fun save(ctx: Context, json: String): String? {
+    private fun save(ctx: Context, v1: String?, v2: String): String? {
         return runCatching {
-            val f = File(ctx.filesDir, "capability_v1.json")
-            f.writeText(json)
+            val f = File(ctx.filesDir, "capability_v2.json")
+            f.writeText(v2)
+            // v1 保留一份，兼容上一轮的读取口径；v2 才是新的全量表
+            v1?.let { runCatching { File(ctx.filesDir, "capability_v1.json").writeText(it) } }
             // 外部目录再放一份：run-as 在本机被 SELinux 挡了（走不通），要取证只能从这里 adb pull
-            ctx.getExternalFilesDir(null)?.let { dir -> runCatching { File(dir, "capability_v1.json").writeText(json) } }
+            ctx.getExternalFilesDir(null)?.let { dir ->
+                runCatching { File(dir, "capability_v2.json").writeText(v2) }
+                v1?.let { runCatching { File(dir, "capability_v1.json").writeText(it) } }
+            }
             f.absolutePath
         }.getOrNull()
     }
