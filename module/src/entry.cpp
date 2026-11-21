@@ -15,6 +15,10 @@
 //   - 未 arm（/data/adb/watchcat/armed 不存在）时绝不做任何决策，只记录现场。
 //   - 全程不抛异常、不 abort：编译期关掉 exception/rtti，出错就 return。
 
+// zygisk.hpp 里用到 dev_t / ino_t（pltHookRegister 的参数），但 jni.h 不带这两个类型，
+// 所以必须先引 <sys/types.h>：官方样例是在更大的编译环境里编的，裸编会报 unknown type。
+#include <sys/types.h>
+
 #include "zygisk/zygisk.hpp"
 
 #include <android/log.h>
