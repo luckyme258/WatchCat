@@ -99,51 +99,84 @@ object ChannelProbe {
         }
     }
 
-    /** 网络/设备通道：移动数据、Wi-Fi 断开、按 uid 的后台流量 */
+    /** 网络/设备通道：移动数据、Wi-Fi 断/开、按 uid 的后台流量 */
     fun probeNetwork(uid: Int): List<Row> {
         val rows = mutableListOf<Row>()
 
-        // 移动数据：读到原值，切到另一档，回读，切回原值
+        // ---- 移动数据 ----
+        // 2026-11-21 实测：本机无 SIM（gsm.sim.state=ABSENT），`svc data enable` 当然不动
+        // mobile_data（0→0）。这不是「写不进」，是**样本无效**，必须记 skipped 而不是 not_writable。
         val dataRead = "settings get global mobile_data"
-        val beforeData = Shell.su(dataRead).output.trim()
-        val wantData = if (beforeData == "1") "0" else "1"
-        val dataCmd = if (wantData == "1") "svc data enable" else "svc data disable"
-        val w1 = Shell.su(dataCmd)
-        val afterData = Shell.su(dataRead).output.trim()
-        val backCmd = if (beforeData == "1") "svc data enable" else "svc data disable"
-        Shell.su(backCmd)
-        val restoredData = Shell.su(dataRead).output.trim()
-        rows += Row(
-            channel = "net",
-            target = "mobile_data",
-            before = beforeData,
-            want = wantData,
-            after = afterData,
-            writeCmd = dataCmd,
-            readCmd = dataRead,
-            verdict = if (afterData == wantData && restoredData == beforeData) "writable" else "not_writable",
-            note = firstError(w1.output) ?: "",
-        )
+        val sim = Shell.su("getprop gsm.sim.state").output.trim()
+        if (sim.isEmpty() || sim.contains("ABSENT") || sim.contains("NOT_READY")) {
+            rows += Row(
+                channel = "net", target = "mobile_data",
+                before = Shell.su(dataRead).output.trim(), want = "-", after = "-",
+                writeCmd = "svc data enable/disable", readCmd = dataRead,
+                verdict = "skipped",
+                note = "无可用 SIM（gsm.sim.state=$sim）：没有卡就没有数据链路可验证，不能记成写不进",
+            )
+        } else {
+            val beforeData = Shell.su(dataRead).output.trim()
+            val wantData = if (beforeData == "1") "0" else "1"
+            val dataCmd = if (wantData == "1") "svc data enable" else "svc data disable"
+            val w1 = Shell.su(dataCmd)
+            val afterData = Shell.su(dataRead).output.trim()
+            Shell.su(if (beforeData == "1") "svc data enable" else "svc data disable")
+            val restoredData = Shell.su(dataRead).output.trim()
+            rows += Row(
+                channel = "net", target = "mobile_data",
+                before = beforeData, want = wantData, after = afterData,
+                writeCmd = dataCmd, readCmd = dataRead,
+                verdict = if (afterData == wantData && restoredData == beforeData) "writable" else "not_writable",
+                note = firstError(w1.output) ?: "",
+            )
+        }
 
-        // Wi-Fi：断和开必须在同一条命令里连做，否则会把 adb 掐死在外面
+        // ---- Wi-Fi 断/开 ----
+        // 踩过的坑（2026-11-21）：旧写法 `disable; sleep 2; enable` 只回读了「开关=1」，
+        // 但手机重连后 DHCP 换了 IP（.3 → .250），无线 adb 连旧 IP 自然连不上 ——
+        // 看起来像「没恢复」，其实是**地址漂移**。所以现在分两步取证：
+        //   ① 断开后必须回读到 0（证明真的断了）
+        //   ② 开启后必须回读到 1，并记录新 IP（证明它真的回来了）
+        // 并且断开与开启各自独立执行，任何一步异常都不会把 Wi-Fi 留在关闭态。
         val wifiRead = "settings get global wifi_on"
         val beforeWifi = Shell.su(wifiRead).output.trim()
-        val wifiCmd = "svc wifi disable; sleep 2; svc wifi enable; sleep 1; svc wifi enable"
-        val w2 = Shell.su(wifiCmd, timeoutMs = 12_000)
+        val ipBefore = wifiIp()
+        var offVal = "-"
+        var onVal = beforeWifi
+        val wifiCmd = "svc wifi disable; sleep 3; settings get global wifi_on; " +
+            "svc wifi enable; sleep 6; settings get global wifi_on; cmd wifi set-wifi-enabled enabled"
+        val w2 = try {
+            val off = Shell.su("svc wifi disable; sleep 3; settings get global wifi_on", timeoutMs = 20_000)
+            offVal = lastValue(off.output)
+            val on = Shell.su("svc wifi enable; sleep 6; settings get global wifi_on", timeoutMs = 25_000)
+            onVal = lastValue(on.output)
+            on
+        } finally {
+            // 兜底：只要最后不是 1，就再拉一次；宁可在探测里多花 5 秒，也不能把机器留在离线态
+            if (Shell.su(wifiRead).output.trim() != "1") {
+                Shell.su("svc wifi enable; cmd wifi set-wifi-enabled enabled; sleep 5; settings get global wifi_on", timeoutMs = 20_000)
+            }
+        }
         val afterWifi = Shell.su(wifiRead).output.trim()
+        val ipAfter = wifiIp()
         rows += Row(
-            channel = "net",
-            target = "wifi",
-            before = beforeWifi,
-            want = "1",
-            after = afterWifi,
-            writeCmd = wifiCmd,
-            readCmd = wifiRead,
-            verdict = if (afterWifi == "1") "writable" else "not_writable",
-            note = "断/开连做（中间 sleep 2s）；只在同一条 su 里执行，避免把无线 adb 掐死",
+            channel = "net", target = "wifi",
+            before = beforeWifi, want = "1", after = afterWifi,
+            writeCmd = wifiCmd, readCmd = wifiRead,
+            verdict = if (offVal == "0" && afterWifi == "1") "writable" else "not_writable",
+            note = buildString {
+                append("断开回读=").append(offVal).append("，开启回读=").append(onVal)
+                append("；IP ").append(ipBefore.ifBlank { "?" }).append(" → ").append(ipAfter.ifBlank { "?" })
+                if (ipBefore.isNotBlank() && ipAfter.isNotBlank() && ipBefore != ipAfter) {
+                    append("（重连后地址变了：无线 adb 必须按新 IP 连，不是没恢复）")
+                }
+                if (w2.timedOut) append("；命令超时")
+            },
         )
 
-        // 按 uid 的后台流量：加白名单 → 回读列表 → 移除
+        // ---- 按 uid 的后台流量白名单 ----
         val netRead = "cmd netpolicy list restrict-background-whitelist"
         val bgCmd = "cmd netpolicy add restrict-background-whitelist $uid"
         val rmCmd = "cmd netpolicy remove restrict-background-whitelist $uid"
@@ -152,7 +185,7 @@ object ChannelProbe {
         val afterBg = Shell.su(netRead).output
         Shell.su(rmCmd)
         val restoredBg = Shell.su(netRead).output
-        val hasUid = { s: String -> s.contains(uid.toString()) }
+        val hasUid = { s: String -> Regex("(^|[^0-9])$uid([^0-9]|$)").containsMatchIn(s) }
         rows += Row(
             channel = "net",
             target = "restrict_background:$uid",
@@ -166,6 +199,17 @@ object ChannelProbe {
         )
 
         return rows
+    }
+
+    /** 取命令输出的最后一行有效值（同一条 su 里跑多步时，只有最后一步的 stdout 是结论） */
+    private fun lastValue(out: String): String =
+        out.lines().lastOrNull { it.trim().isNotEmpty() }?.trim() ?: "-"
+
+    /** 当前 Wi-Fi 的 IPv4 地址；拿不到返回空串（未连上/无权限都算拿不到） */
+    private fun wifiIp(): String {
+        val out = Shell.su("cmd wifi status").output
+        val m = Regex("IP: /([0-9.]+)").find(out)
+        return m?.groupValues?.getOrNull(1) ?: ""
     }
 
     /** 从 dumpsys package 里读某个权限的 granted 状态；读不到用 "-"（不等于 false） */

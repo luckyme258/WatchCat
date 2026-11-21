@@ -22,8 +22,8 @@ android {
         applicationId = "com.luckyme.watchcat"
         minSdk = 30
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 3
+        versionName = "0.3.0"
 
         // 只编两个 ABI：真机 arm64 + 模拟器 x86_64（规范 W13）
         ndk {

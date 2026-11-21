@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 纯黑底 + 薄荷绿主色：与 Ui.kt 里的常量一一对应，改一处要同步另一处 -->
+    <style name="Theme.WatchCat" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#FF000000</item>
+        <item name="android:colorAccent">#FF3DDC97</item>
+        <item name="android:colorPrimary">#FF000000</item>
+        <item name="android:colorPrimaryDark">#FF000000</item>
+        <item name="android:statusBarColor">#FF000000</item>
+        <item name="android:navigationBarColor">#FF000000</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:textColorPrimary">#FFF3F3F5</item>
+        <item name="android:textColorSecondary">#FF8A8A93</item>
+    </style>
+</resources>
