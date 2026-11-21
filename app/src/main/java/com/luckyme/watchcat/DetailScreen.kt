@@ -124,21 +124,28 @@ class DetailScreen(
                 act.packageManager.getPackageInfo(pkg, PackageManager.GET_PERMISSIONS)
                     .requestedPermissions?.toList() ?: emptyList()
             }.getOrDefault(emptyList())
-            val p = if (identity == "root") Engine.readPerms(pkg) else emptyMap()
-            val o = if (identity == "root") Engine.readOps(pkg, uid) else emptyList()
-            val bg = if (identity == "root") Engine.bgTrafficAllowed(uid) else false
+            // 读取阶段的任何异常都不许冒到线程外：后台线程未捕获异常会直接崩掉整个进程，
+            // 界面上只会看到「闪一下没了」。这里一律吞成可读的错误文案（W9 留痕原则）。
+            var err: String? = null
+            val p = if (identity == "root") runCatching { Engine.readPerms(pkg) }
+                .onFailure { err = "读权限失败：${it.javaClass.simpleName}" }
+                .getOrDefault(emptyMap()) else emptyMap()
+            val o = if (identity == "root") runCatching { Engine.readOps(pkg, uid) }
+                .onFailure { err = "读 appops 失败：${it.javaClass.simpleName}" }
+                .getOrDefault(emptyList()) else emptyList()
+            val bg = if (identity == "root") runCatching { Engine.bgTrafficAllowed(uid) }.getOrDefault(false) else false
             act.ui {
                 requested = req
                 perms = p
                 ops = o
                 bgAllowed = bg
                 busy = false
-                status.text = if (identity == "root") {
-                    "已读取 ${req.size} 条申请权限 / ${o.size} 条 op 记录"
-                } else {
-                    "没有 root：只能看，不能改"
+                status.text = when {
+                    err != null -> err!!
+                    identity == "root" -> "已读取 ${req.size} 条申请权限 / ${o.size} 条 op 记录"
+                    else -> "没有 root：只能看，不能改"
                 }
-                status.setTextColor(if (identity == "root") Ui.FAINT else Ui.WARN)
+                status.setTextColor(if (identity == "root" && err == null) Ui.FAINT else Ui.WARN)
                 render()
             }
         }

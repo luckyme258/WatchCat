@@ -53,9 +53,11 @@ object Engine {
         val times = parseTimes(raw)
         val out = ArrayList<OpState>()
         ROW.findAll(json).forEach { m ->
+            // 分组顺序必须与 ROW 里的括号一致：1=op、2=modeId、3=scope
+            // （曾经按 1/4 取，运行到详情页直接 IndexOutOfBounds 崩掉，2026-11-21 真机）
             val op = m.groupValues[1]
-            val scope = m.groupValues[4]
-            val id = m.groupValues[3].toIntOrNull() ?: 0
+            val scope = m.groupValues[3]
+            val id = m.groupValues[2].toIntOrNull() ?: 0
             out += OpState(op, scope, id, times[op to scope] ?: "")
         }
         return out

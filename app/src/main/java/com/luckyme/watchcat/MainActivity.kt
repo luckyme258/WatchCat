@@ -144,6 +144,9 @@ class MainActivity : Activity() {
             val text = Engine.identityText()
             val ok = text.startsWith("root")
             ui {
+                // 顶栏胶囊和列表页的身份条是同一份事实，必须同时更新，
+                // 否则会出现「顶栏 root、卡片还在检测中」的自相矛盾（2026-11-21 真机见）
+                apps?.setIdentity(text, ok)
                 identityPill?.let {
                     it.text = if (ok) "root" else "未授权"
                     it.setTextColor(if (ok) Ui.ACCENT else Ui.WARN)
