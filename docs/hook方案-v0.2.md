@@ -1,0 +1,494 @@
+# WatchCat v0.2 · 数据面（Hook）实施底稿
+
+> 状态：**架构已定，未动代码**
+> 日期：2026-11-21
+> 决策已定：走 Vector（最新 LSPosed）｜Zig 参与 hook 侧｜接受"不自动生效 + 连续异常停用"兜底｜接受"system 侧读 root 文件、应用侧接受名单可见"的折中｜接受"自洽原则""不压系统提示"四条硬规矩
+> 追加决策（2026-11-21）：**P0 先做 Zig 进 system_server 的加载探针**｜分发形态定为 **控制台 APK + Magisk/Zygisk 模块包**｜默认值走 **预置数据集**（见附录 A）｜替身内容 **自建词库先起个头**（见附录 A）｜审计 **只做简版历史 + 汇总**
+
+---
+
+## 0. 一句话结论
+
+v0.2 只做两件事：**剪贴板（system_server 单点注入）** 与 **应用列表（应用内注入）**。前者风险最小、收益最直接，作为第一条主线；后者必须成套做（列表 + 单点 + Intent 三件套），单独做列表等于主动留破口。Zig 的角色是**规则判定引擎**，Kotlin 是 hook 适配层，两者通过 C ABI 分工；Zig 能否真的进到 system_server，是 P0 探针要回答的第一个问题。
+
+---
+
+## 1. 边界
+
+**做**：剪贴板返回值（放行/空/替身）按调用 uid 决策；应用列表对指定应用隐藏；两份策略可导入导出。
+
+**不做（本版明确排除）**：
+- 通讯录、通话记录、短信——需要另一套 provider 级方案，不在本版。
+- 相机、麦克风伪造——native 输出链，Xposed 钩不进（参考项目已确认这个限制），单列 v0.3。
+- 权限面（`pm revoke`/`appops`）——已成型，不动，也不允许被 hook 逻辑污染。
+- 反检测对抗（隐藏 Xposed 痕迹）——不做。真要做是另一场无休止的猫鼠游戏，且我们宁可"被发现"也不"装得像没装"。
+
+---
+
+## 2. 架构分层
+
+```text
+watchcat.apk   一个 APK，两种身份（LSPosed 模块要求配置属于模块包，故必须合并）
+  ├─ UI 层：策略编辑 / 导入导出 / 审计 / 诊断 / 权限面（v0.1 资产全在这里）
+  ├─ 控制层：写 remote preferences（框架托管）；不参与任何运行时判定
+  └─ hook 层：极简入口类，onSystemServerStarting / onPackageReady
+              · 定位注入点、枚举同名重载、取调用 uid
+              · 零静态状态、零 UI 依赖、失败即放行（fail-open）
+                    │ JNI（C ABI，纯函数，按 handle 实例化）
+watchcat-module.zip   Magisk 模块（只放 native 与脚本，不含判定逻辑）
+  └─ libwatchcat.so（由 Zygisk 加载，不是 System.load）
+zig/  同一份源码，两个编译目标
+  ├─ watchcat.zig  → 权限面导出（nativeReadOps / nativeWriteOp …，现有 8 个）
+  └─ engine.zig    → 数据面导出（wc_engine_*）
+                    · decide(uid, kind) -> allow|empty|fake|block
+                    · filter(uid, pkgs[]) -> 保留子集
+                    · pick(uid, scene, seed) -> 假数据内容
+```
+
+三层各管一件事，**任何一层都不许替另一层做决定**：UI 只写策略不判定；hook 层不算业务；Zig 不碰 Android API（无 JNI 反向调用），输入输出全是纯数据。
+
+三个必须记住的工程事实：
+
+1. **`.so` 会被加载两次**（App 进程一次、system_server 一次），所以引擎必须“按 handle 实例化、无全局可变状态”，禁止“初始化一次到处用静态变量”。
+2. **`.so` 里并存两组符号**，前缀分开（`native*` = 权限面拼命令，`wc_engine_*` = 数据面纯判定），且来自两个互不依赖的编译单元，避免语义互相污染。
+3. **hook 侧代码与 UI 代码同在一个 APK 但不得互相引用**：UI 类一旦在目标进程被初始化（拿 Context、读资源）就会拖崩别人，2.1 的 `XResources`/`findClass` 事故就是先例。
+
+### 2.1 与 v0.1 的整合边界
+
+**复用（不重写）**
+
+| 资产 | 复用方式 |
+|---|---|
+| `Ui.kt` 视觉层 | 原样用，数据面新增“胶囊”而非“开关”控件 |
+| `AppsScreen.kt` | 就是数据面的目标选择器，不改结构 |
+| `DetailScreen.kt` | 增加“数据面”一节（权限面那节不动） |
+| `DiagScreen.kt` | 增加“数据面状态”块（armed / 作用域 / 引擎） |
+| `Audit` | 同一份日志、同一格式，只加字段（见 §6.1） |
+| `Shell.su` + 身份三态 | 控制台侧继续用；hook 侧不依赖 root |
+| `tools/build_so.py` | 继续做编译 + 16KB 门禁，ABI 只留 arm64 |
+| `.github/workflows/build.yml` | 一条流水线出两个产物 |
+
+**隔离（永不混合）**
+
+| 边界 | 原因 |
+|---|---|
+| `CapabilityProbe` / `ChannelProbe` 不进 hook 侧 | 它们真的写系统状态（`appops set`、`svc wifi`），在别人进程里做实验不可接受 |
+| `Engine.writeOp` 与 hook 判定分属两个类 | 失败语义相反：权限面失败要报错，数据面失败要放行 |
+| 策略文件不承载“权限授予状态” | 权限面事实源是 `dumpsys`/`appops`；策略文件只是数据面事实源，混了就出现会漂移的假真相 |
+| 能力表分两张 | 权限面 `capability_v2.json` 回答“系统让不让写”；数据面另出一张回答“我们钩没钩上、返回什么”。混在一张表里没人读得懂 |
+
+**重构（小改）**
+
+1. 详情页的“数据面”用胶囊（放行/空/替身/阻断），并在标题写明“决定它看到什么，不影响权限授予”——现在两者都用绿色开关，用户一定会误判。
+2. 详情页 Hero 加一行汇总：“权限：已授予 3 项 · 数据面：剪贴板空、列表替身”，避免用户以为“权限关了却还能用”是 bug。
+3. 产物变两个（`app-debug.apk` + `watchcat-module.zip`），Release 挂两个附件，这条要写进规范分发段。
+
+---
+
+## 3. 为什么 Zig 放这个位置（以及它的真实极限）
+
+先说实话：**性能不是理由**。剪贴板判定量级是"每分钟几十次"，应用列表过滤是"每次几百条"，Kotlin 做这两件事毫无压力。Zig 在这里的价值是三条：
+
+1. **确定性**：无 GC、无运行时、同一输入永远同一输出，适合"判定"这种必须可复现的逻辑；
+2. **可单测**：`zig test` 能在 CI 里跑纯逻辑（现有 4 个单测就是这么来的），而 hook 侧的行为只能在真机上碰运气；
+3. **一处实现两处用**：同一份判定代码，system_server 里用一次、目标应用进程里用一次，行为不会漂移。
+
+**极限**：Zig 进不了 `system_server` 这件事本身有风险，取决于 SELinux 与加载路径，**必须在 P0 用探针证实**，不能假设。我们已有的 `.so` 导出（`nativePing` / `nativeVersion`）正好可以当这个探针——能 ping 通，就说明加载链成立。
+
+### 3.0 Vector 事实基线（已核对作者仓库，2026-11-21）
+
+| 事实 | 结论 | 来源 |
+|---|---|---|
+| 定位 | Zygisk 模块，基于 **LSPlant** 提供 ART hook，保持与原版 Xposed 的 API 一致性；只在内存改行为，不改 APK | 作者 README |
+| 版本范围 | Android **8.1 – 17 Beta** | 作者 README |
+| 运行前提 | 较新的 Magisk 或 KernelSU **且启用 Zygisk** | 作者 README |
+| API 代际 | 2.0 = API 100 的封版；**2.1（2026-08-02）= 首个 API 101 版本**；**2.2（2026-08-04，当前 stable）= API 102 热重载** | Releases |
+| 16KB | 2.1 起**原生支持 16KB 页设备** | v2.1 release notes |
+| 配置归属 | "一个模块 = 一个包 + 一个二进制"，配置属于该包；只在安装它的用户里运行，**system_server 例外**（它不属于任何用户） | v2.2 release notes |
+| 已知致命坑 | 2.1 的 release 构建"模块加载了但什么也没钩上"：R8 把 `XResources` 合并进共享类，`system_server` 里一次 `findClass` 失败就是**整个开机周期永久失败**；2.2 已修 | v2.2 release notes |
+| 管理器匹配 | 2.1 的管理器**连不上 2.2 的守护进程**，独立管理器要先卸载再升级 | v2.2 release notes |
+| 开发者依赖 | 同时维护 legacy API 与 modern `libxposed` API（module API + service API 两个 submodule），**建议 checkout 与 Vector 相同的 commit** | README |
+| 发版节奏 | stable 之外有 canary（约每周，例：3119 / 2026-11-15） | Releases |
+
+**第三方指南里出现、但作者仓库未写的两条**（我们按"待实测"处理，不当结论用）：Magisk 具体版本门槛（v30.7 / v31.1）、"与旧 LSPosed 并存会 bootloop"。这两条只作为安装时的提醒，不作为代码里的硬判断。
+
+### 3.1 加载形态：只走 Zygisk（原方案的 B 已废弃）
+
+| 形态 | 谁把 .so 塞进目标进程 | 结论 |
+|---|---|---|
+| **A. Zygisk 模块（唯一方案）** | Magisk/KernelSU 的 Zygisk 在 zygote fork 阶段注入；Vector 本身也是 Zygisk 模块，二者共存于同一 Zygisk 环境 | **采用** |
+| ~~B. Vector 内 `System.load`~~ | 由被注入的 Java 层 `dlopen` 我们 APK 里的 lib | **废弃**：Vector 修 dex2oat 时都要用 `memfd_create` 绕 bionic 命名空间限制（v2.0 release notes），说明"从可写目录 dlopen"在 Android 10+ 本来就不可靠 |
+
+所以 Zig 的 `.so` 必须由 Zygisk 加载，**不是**由我们的 Java 代码 `System.load`。若这条在 P0 证伪，退路是**剪贴板判定退回 Kotlin，Zig 只保留"离线编译策略 blob + 词库"**（仍在链路里，但不在热路径）。
+
+**API 基线定为 101，不追 102。** 理由：101 在 2.1/2.2 上都支持；102 的收益是"代码热替换"，而我们的热更新对象是**规则**不是代码——规则变更走 remote preferences + 引擎 reload 就能生效，不值得为此把最低框架版本抬到 2.2。
+
+---
+
+## 4. 剪贴板：注入点与方法面
+
+### 4.1 注入点
+
+`ClipboardManager`（应用侧）→ binder → `com.android.server.clipboard.ClipboardService`（system_server）。**只钩 system_server 一侧**，一次注入覆盖全部应用，且每行都能取 `Binder.getCallingUid()`。
+
+### 4.2 方法面（按"族"钩，不按签名钩）
+
+**关键工程决定：按方法名枚举"同名重载"，不在代码里写死签名。** 具体 API 形态按 libxposed 101：用 interceptor（不是 legacy 的 `XC_MethodHook`），入口用 `onSystemServerStarting`（不是 `handleLoadPackage`，也**不许靠进程名猜**——v2.1 就踩过"模块加载了但 `system_server` 里 `findClass` 全挂"的坑）。
+
+原因：API 29→36 之间这几个方法的参数形态改过（多了 `pkg`、`attributionTag`、`userId`、`deviceId` 等），写死签名等于给自己埋一个"到某代系统就静默失效"的雷。回调里靠 `Binder.getCallingUid()` 判定，参数只用于取包名做审计。
+
+要覆盖的方法族（**具体重载在 P0 打点打印实测，不猜**）：
+
+- `getPrimaryClip`（读）——主目标
+- `hasPrimaryClip`（读，返回 boolean）
+- `getPrimaryClipDescription`（读，返回描述）
+- `addPrimaryClipChangedListener` / `removePrimaryClipChangedListener`（读事件）
+- `setPrimaryClip` / `setPrimaryClipAsPackage` / `clearPrimaryClip`（写方向，**默认不拦**，只记审计；写入被拦会让"复制"这件事整体失效，属于自伤）
+- 读方向之外还可能有 `getPrimaryClipSource` 一类的新 API，P0 一并打点
+
+### 4.3 返回值三态
+
+| 模式 | 返回 | 适用 | 风险 |
+|---|---|---|---|
+| 放行 | 原值 | 白名单、输入法 | — |
+| **空**（默认） | `null` ClipData | 绝大多数应用 | 少数应用会当成"剪贴板为空"正常处理，极少数会 NPE |
+| 替身 | 构造的 ClipData | 需要"看起来有内容"的场合 | 内容不符场景会被判定异常，必须分池 |
+| 阻断（显式选项） | 抛 `SecurityException` | 不给任何机会 | **最容易让应用崩**，不设默认 |
+
+**默认必须是"空"**。`null` 是系统自己也合法的返回值（真没内容时就是 null），最不容易被识别成异常。
+
+### 4.4 三条必须遵守的细节
+
+1. **输入法放行**：当前激活输入法（`InputMethodManager` 的当前 IME 包名 / `settings get secure default_input_method`）永远放行，否则用户自己的剪贴板粘贴功能会坏——这是 ClipBait 专门处理过的坑。
+2. **保留系统提示**：Android 12+ 读剪贴板会弹"已粘贴来自…"，这个提示**不压**。它属于审计，不属于要伪造的东西；压掉等于帮应用隐瞒行为。
+3. **替身内容要分池**：购物/社交/工具各一池，且内容长度、字符集要像"人复制的东西"。单一固定词在真实应用里等于自报"我被 hook 了"。起步词库见附录 A.2，先满足"每池≥8 条、长度 6–40 字、无敏感词"。
+
+### 4.5 审计事件
+
+每次决策产生一条：`ts | uid | pkg | kind(read) | mode | verdict`。同一 uid 在 1 秒内的连续读取合并计数（防止刷日志）。
+
+审计按"简版"做，两档就够：
+
+- **历史**：环形保留最近 200 条，只给"谁在什么时候读了几次"；
+- **汇总**：按包名聚合"累计读取次数 + 最近一次时间"，页面上排个前 10。
+
+不做"前台偷读比"这类精细统计（ClipBait 的"光荣榜"那套），后面有空再单独优化。
+
+---
+
+## 5. 应用列表：成套做，自洽优先
+
+### 5.1 注入位置
+
+**第一版走应用内注入**（注入到被管应用进程），钩 `android.app.ApplicationPackageManager`（`Context.getPackageManager()` 实际返回的就是它）。风险容器化：崩的只是那个应用，不至于让系统起不来。
+
+（系统端在 `PackageManagerService` 里按 calling uid 过滤也可以，但一崩就是软重启甚至开不了机，不在第一版。）
+
+### 5.2 必须同时覆盖的四个面
+
+| 面 | 目标方法 | 处理 |
+|---|---|---|
+| 列表 | `getInstalledPackages`、`getInstalledApplications` | 从结果里剔除被隐藏项 |
+| 单点 | `getPackageInfo`、`getApplicationInfo` | **抛 `NameNotFoundException`**（不返回 null，null 不合法） |
+| Intent | `queryIntentActivities`、`queryIntentServices`、`queryIntentProviders`、`queryIntentReceivers`、`resolveActivity`、`resolveService`（含 13+ 的 `ResolveInfoFlags` 重载） | 剔除结果；`resolve*` 返回 null |
+| 跨 uid | `getPackagesForUid`、`getNamesForUids` | 剔除 |
+
+二期再谈：`ActivityManager.getRunningAppProcesses`、`UsageStatsManager`、`LauncherApps`、无障碍窗口包名。这些偏"行为"而非"清单"，漏了不容易被抓，但终归要补。
+
+### 5.3 自洽原则（写进规范的那条，在这里具化）
+
+**同一个"事实"在所有 API 上必须给同一个答案：**
+
+- 列表里没有 → `getPackageInfo` 必须 `NameNotFoundException`
+- 列表里没有 → `resolveActivity` 必须 `null`
+- 列表里没有 → `getPackagesForUid` 必须空
+- 反过来，**列表里有的，单点必须能查到**（否则"隐藏"变成了"全隐藏"，应用直接崩）
+
+XPrivacyLua 明确写了"出于稳定性考虑不限制单个应用信息"，那等于自己留了最经典的反检测破口。我们不学它。
+
+### 5.4 名单策略：宁少不多
+
+Android 11 起 `<queries>` 让"应用只能看到一部分应用"成为常态，所以**"少看到"不引起怀疑，"多看到"才可疑**。因此：
+
+- 默认模式 = **白名单可见**（只让它看到系统应用 + 一个低风险预置集），而不是"黑名单隐藏"；
+- 预置集用市面上最常见的那批（微信/支付宝/抖音/淘宝/高德…），显得像一个正常用户；
+- 允许按包名手工增删，导出只导出包名与标签，不带用量数据。
+
+**不要返回完全空的列表**：很多应用把"一个应用都没装"当成环境异常，直接进异常分支。默认给一份**预置可见集**（见附录 A），看起来就是一个装了十几款常用应用、连银行都没装的普通用户。
+
+---
+
+## 6. 策略下发与保密（按 Vector 2.2 的真实机制改写）
+
+**主通道：libxposed remote preferences。** 现代 API（101+）里配置由框架托管，取代了 legacy 的 `XSharedPreferences`；而且按作者的实现说明，**现代模块不再有"世界可读 prefs"重定向**（v2.2 release notes 也确认"一个模块 = 一个包 + 一个二进制，配置属于该包"）。这意味着原来"接受名单可见"的折中**可以升级成"默认不可见"**。
+
+| 消费方 | 通道 | 保密性 | 说明 |
+|---|---|---|---|
+| system_server（剪贴板） | 框架 remote preferences（模块包提供） | 目标应用读不到（**待靶子实测确认**） | 判定在 system 侧，本来也不需要目标进程持有名单 |
+| 目标应用进程（应用列表） | 同一份 remote preferences | 同上 | 注入进来的是模块代码，取配置走框架接口 |
+| native（Zig） | Java 侧把配置转成紧凑 blob 后经 JNI 传入 | — | native 不碰文件、不碰框架 API，符合"Zig 不反向调 JVM" |
+| 兜底文件通道 | `/data/misc/watchcat/policy.bin`（`0640 root:system`） | 普通应用读不到 | **仅在"native 需在 Java 层之前拿到配置"这种特殊场景才用**，SELinux 是否允许 system_server 读该目录需 P0 实测 |
+
+**明确禁止**：把策略放 `/sdcard`、`/data/local/tmp`，或做成"人人可读的明文 JSON"。那等于挂个牌子告诉应用"你正在被骗"。
+
+**诚实边界**：注入是"同 uid 同进程"，理论上目标应用能 dump 出自己的内存，所以"绝对不可保密"对任何 in-process 方案都成立。我们能做的是"不落明文、不给世界可读入口、不主动暴露"，而不是承诺"读不到"。真正的绝对隔离只有 system 侧判定。
+
+**由此确定的一条结构决策：控制台与模块合并成一个 APK。** 因为配置属于模块包，独立包名的控制台既写不了 remote preferences、也读不到模块的 scope 信息（v2.2 release notes 的"one module, one configuration"）。合并后 Magisk zip 只承载 Zig `.so` 与脚本，Release 仍是两个附件（APK + zip）。
+
+---
+
+## 7. Zig 引擎接口草案（只定语义，不写实现）
+
+原则：**按 handle 实例化、纯函数、不反向调 JVM、热路径零分配（预分配 arena）**。`.so` 会被两个进程各加载一次，所以任何全局可变状态都是 bug。
+
+**生命周期（P0 只用这三个符号，先证明加载链）**
+
+| 函数 | 输入 | 输出 | 说明 |
+|---|---|---|---|
+| `wc_engine_ping()` | — | `0x5743` | 固定魔数，用来证明"我在这个进程里活着" |
+| `wc_engine_create(path)` | 策略 blob 路径 | handle / null | 每个进程各建一个实例；路径读不到就返回 null（调用方据此放行） |
+| `wc_engine_destroy(h)` | handle | — | 进程退出前释放，不做也行（系统会回收） |
+
+**判定（A/B 阶段才用）**
+
+| 函数 | 输入 | 输出 | 说明 |
+|---|---|---|---|
+| `wc_engine_reload(h)` | handle | 0/-1 | 热更新，失败保留旧表 |
+| `wc_clip_decide(h, uid, pkg)` | handle + uid + 包名 | `0 放行 / 1 空 / 2 替身 / 3 阻断` | 剪贴板唯一决策入口 |
+| `wc_clip_pick(h, uid, scene, seed)` | handle + uid + 场景 + 种子 | 字符串 | 同一 (uid, seed) 必须稳定 |
+| `wc_app_visible(h, uid, pkg)` | handle + uid + 包名 | bool | 单点/Intent 面用 |
+| `wc_app_filter(h, uid, in[], n, out_bitmap)` | handle + uid + 包名数组 | 保留位图 | 列表面用，避免逐条 JNI 往返 |
+| `wc_stats_push(h, uid, kind)` | handle + uid + 类型 | — | 可选：计数留在 native，Kotlin 定时取走 |
+
+**单测口径**（进 CI，`zig test`）：给定策略 + 给定 uid，决策必须与期望表逐条一致；`wc_app_filter` 对 1000 条输入的结果必须与逐条 `wc_app_visible` 完全等价（防止两条路径漂移）。
+
+**16KB**：`.so` 必须过现有门禁（`tools/build_so.py` 已校验），且 ABI 只保留 `arm64-v8a`（省体积，也省一个对齐面）。
+
+---
+
+## 8. 兜底：不自动生效 + 连续异常停用
+
+这是本版最重要的安全设计，按"宁可漏报，不可变砖"来定。
+
+### 8.0 启用前置自检（任一不满足就拒绝启用，并在诊断页写明原因）
+
+这几条是 Vector 的实测坑，写成自动检查而不是文档里让人背：
+
+1. **框架 API ≥ 101**（Vector 2.1+）。低于这个，现代模块完全不加载——按 v2.2 的记录，2.1 还出现过"模块加载了但什么都没钩上"的形态，必须拒绝启用而不是"看起来绿了"。
+2. **scope 必须包含"系统框架"（包名 `system`）**。勾 `android` 会得到一个"显示已启用、静默不生效"的模块。诊断页直接读自己的 scope 并显示。
+3. **管理器与守护版本配套**。2.1 管理器连不上 2.2 守护；版本不一致时只提示、不启用。
+4. **模块确实在本用户安装**。v2.2 起模块只在其被安装的用户内运行（system_server 例外），多用户场景要检查。
+5. **Zygisk 未被排除**。Magisk 的 DenyList / 排除进程若把相关进程列进去，注入会静默失效。
+
+Magisk/KernelSU 的具体版本门槛来自第三方指南、作者 README 只写"较新版本 + 启用 Zygisk"，所以这一条**只提示不硬判**，避免把用户挡在门外。
+
+### 8.1 激活闸门
+
+1. 模块装好后**默认不生效**：策略目录里没有 `armed` 文件，hook 侧读到就直接返回、不挂任何钩子。
+2. 用户在 App 里点"启用"→ 写 `armed`（内含当前 `boot_id` 和签发时间）。**装完即生效是禁止行为**。
+3. `armed` 只在"用户明确启用后"存在；任何自动停用都会把它删掉，并留下 `tripped` 记录供 App 展示"已因异常自动停用"。
+
+### 8.2 异常判定（三次机会）
+
+- hook 侧启动后 **90 秒内**必须写出一次心跳（带 boot_id）。
+- 每次开机若"没心跳"→ 计一次失败；失败计数 ≥2 → 自动停用（删除 `armed`），此后不再注入任何东西。
+- 计数成功的标志是"心跳写成功且 hook 侧自检通过"（自检 = 引擎 `wc_init` 成功 + 至少一次决策被调用）。
+- 判定口径写死在 root 侧脚本里，不依赖崩溃上报（可能根本来不及上报）。
+
+### 8.3 fail-open
+
+所有 hook 回调外层包"异常 → 走原逻辑"。**判定失败一律放行，绝不返回错误值。** 只有用户显式选"阻断"模式时才允许抛异常，且要在 UI 上标注"可能让应用崩溃"。
+
+### 8.4 需要 P0 实测的两个点
+
+- system_server 在 SELinux 下能写哪些路径（心跳、`armed` 读取路径都依赖它）；
+- 若 system_server 完全写不了，退化方案：心跳改由 root 侧脚本在开机后主动"探测"（例如查 `/proc/<pid>/maps` 里有没有我们的 .so），失败计数改由脚本维护。
+
+---
+
+## 9. 验收：自建靶子，交叉校验
+
+写一个极简靶子应用（自己写，不上架），专门做四件事：
+
+1. 读剪贴板（前台/后台各一次，记录返回值与耗时）；
+2. `getInstalledPackages` 全量 dump；
+3. 对名单里每一个包做 `getPackageInfo` + `resolveActivity`（**交叉比对**）；
+4. 每 3 秒轮询一次剪贴板，模拟"偷读"，用于验证审计计数。
+
+**通过标准**：
+
+- 剪贴板：靶子读到 `null`（或指定替身），输入法粘贴仍正常，系统提示仍在；
+- 列表：`getInstalledPackages` 里没有隐藏项，且对隐藏项 `getPackageInfo` 抛 `NameNotFoundException`、`resolveActivity` 为 null；
+- **自洽**：三条路径的答案完全一致，没有"列表没有但单点有"；
+- 审计：靶子的每次读取都能在 App 里对应上，且 1 秒内的连读被合并；
+- 兜底：手工把 `armed` 删掉再重启，确认"完全不注入"；再模拟一次"无心跳"，确认第二次开机自动停用。
+
+---
+
+## 10. 分期
+
+| 阶段 | 内容 | 产出 | 估时 |
+|---|---|---|---|
+| **P0 探针**（已定，先做这条） | ① Zygisk 模块骨架能否把 Zig `.so` 带进 system_server 并 `nativePing` 通；② 剪贴板方法族真实签名打点；③ system_server 在 SELinux 下的可读/可写路径（`/data/misc` vs `/data/system`）；④ Vector 在本机的作用域与热生效 | 一页探针报告 + 真机证据 | 0.5 天 |
+| **A 剪贴板** | 三态决策 + 输入法放行 + 审计 + 热生效 | 可用的剪贴板保护 | 1–2 天 |
+| **B 应用列表** | 四面覆盖 + 自洽 + 名单编辑/导入导出 | 可用的列表伪造 | 2–4 天 |
+| **C 打磨** | 分池词库、简版审计页、自动停用 UI、诊断页接入 | 收尾 | 1–2 天 |
+
+P0 的四条按顺序做，**任一条证伪就当场改设计**，不硬推。第 ① 条决定 Zig 的参与形态，第 ③ 条决定心跳与闸门放哪，这两条最可能推翻细节。
+
+每阶段都走 CI 出包、真机装、靶子验，**不在本机出包**（G0.0）。
+
+---
+
+## 11. 风险登记
+
+| 风险 | 触发条件 | 缓解 |
+|---|---|---|
+| system_server 起不来 | 钩子写坏/加载失败 | 不自动生效 + 两次无心跳停用 + fail-open |
+| Zig lib 进不去 system_server | SELinux/加载路径 | 形态 B 退路；再不行判定退回 Kotlin |
+| 剪贴板被"读空"识别 | 应用把 null 当异常 | 默认空 + 可切替身 + 分池词库 |
+| 列表不自洽被抓 | 只做列表不做单点 | 四面覆盖 + 靶子交叉校验门禁 |
+| 反作弊/银行类误伤 | 注入痕迹 | 作用域最小化（只勾目标应用）＋ 明确不做隐藏痕迹 |
+| Vector 版本漂移 | 框架升级改 API | 诊断页固定展示"框架 API / 作用域"，不满足就拒绝启用 |
+| 16KB 未对齐 | 新系统加载失败 | 现有 `.so` 门禁复用，ABI 只留 arm64 |
+
+---
+
+## 12. 规范要新增的条目（草案）
+
+**特定段（W 系列）**
+
+1. 模块形态：hook 侧零 UI 依赖、无静态初始化副作用、作用域最小化；system_server 注入默认不生效 + 连续两次无心跳自动停用 + fail-open。
+2. 规则下发：**主通道是框架托管的 remote preferences**（配置属于模块包）；文件通道只作 native 特殊场景的兜底，且必须 `root:system 0640`。**禁止人人可读的明文策略**。
+3. 假数据自洽：同一事实在列表/单点/Intent/跨 uid 四个面必须同答案；禁止"列表空、单点有"。
+4. 系统提示不当伪造对象：剪贴板读取提示、权限提示、定位提示一律保留。
+5. 默认值方向：隐私类默认"少给"（空/白名单），不默认"多给"。
+6. 产物形态：引入注入能力后，一次发布出两个附件（APK + 模块 zip），Release 与 CI artifact 都要成对出现，禁止只发 APK 让人"装了却什么都没生效"。
+7. 审计字段扩展向后兼容：只加字段（`kind=perm|data`）、不改旧字段、不换分隔符；旧日志没有 `kind` 时按 `perm` 解释。
+8. 能力表分账：权限面一张、数据面一张，各自回答不同问题，禁止合并成一张。
+9. UI 语义不混用：权限面用"开关"（授予/不授予），数据面用"胶囊"（放行/空/替身/阻断），并在标题上写明"不影响授权"。
+10. **框架依赖锁定**：`libxposed` module API / service API 两个 submodule 固定到与 Vector 当前 stable 相同的 commit，不跟随 master 漂移（作者 README 明确建议开发者 check out 同一 commit）。
+11. **框架基线**：模块声明 API 101；运行时要求 Vector ≥ 2.1。低于基线一律拒绝启用，不允许"降级到 legacy 82 凑合用"。
+12. **hook 侧构建禁混淆**：R8 不得触及 hook 侧类（2.1 的 `XResources` 被合并导致 `system_server` 里 `findClass` 永久失败就是先例），且 hook 侧禁止依赖资源系统。
+
+**通用段（G 系列）**——暂不需要新增，G0.0（CI 优先）继续适用。
+
+---
+
+## 13. 决策记录
+
+**已定（2026-11-21）**
+
+1. P0 第一条 = **Zig 进 system_server 的加载探针**，但表述修正为：先用 `onSystemServerStarting` 证明"框架告知我在 system_server"，再跑 `wc_engine_ping`（v2.1 的教训是"加载了但钩不上"，所以两步必须都过）。
+2. 分发形态 = **一个 APK 同时兼任控制台与 LSPosed 模块**（原"控制台 + 模块两个包"作废）：配置属于模块包，独立控制台写不了 remote preferences。Magisk zip 只承载 Zig `.so` 与脚本。
+3. 框架基线 = **libxposed API 101 / Vector ≥ 2.1**，不追 API 102 热重载（我们热更新的是规则，不是代码）。
+4. 默认值 = **预置数据集**：剪贴板默认"空"，白名单只含当前输入法与系统框架；应用列表默认"预置可见集"（见附录 A.1），默认不隐藏任何应用。
+5. 替身内容 = **自建词库**，先按附录 A.2 起头（每池 8–10 条），后续空闲再扩。
+6. 审计 = **简版**：最近 200 条历史 + 按包名汇总的读取次数，不做"前台偷读比"。
+7. 配置通道 = **remote preferences 为主**（目标应用不可见，待靶子实测确认）；`0640` 文件只作 native 兜底。
+
+**仍开放的实现细节（P0 后定，不需要现在拍板）**
+
+- 心跳与闸门文件落 `/data/misc` 还是 `/data/system`（取决于 SELinux 实测）。
+- 是否需要单独的"停用工具"（root 侧脚本），还是靠 App 写标记即可。
+- 词库热更新走 remote preferences 变更通知还是"重启模块生效"。
+
+---
+
+# 附录 A · 预置数据（首版）
+
+> 这些是**默认值**，用户可整体替换、可单条增删。原则：像普通用户、不带敏感偏好、不含金融与政务类应用。
+
+## A.1 应用列表预置可见集
+
+**始终可见（系统面）**：`com.android.systemui`、`com.android.settings`、`com.android.shell`、`com.google.android.gms`（若存在）、桌面包（`com.google.android.apps.nexuslauncher` / `com.miui.home` 等按机型探测，不硬编码）。
+
+**预置常用（默认"装了但只是普通应用"的观感）**：
+
+| 类别 | 包名 |
+|---|---|
+| 社交 | `com.tencent.mm`、`com.tencent.mobileqq`、`com.sina.weibo` |
+| 支付/电商 | `com.eg.android.AlipayGphone`、`com.taobao.taobao`、`com.jingdong.app.mall`、`com.xunmeng.pinduoduo` |
+| 内容 | `com.ss.android.ugc.aweme`、`com.xingin.xhs`、`com.netease.cloudmusic`、`com.tencent.qqlive` |
+| 出行/工具 | `com.autonavi.minimap`、`com.baidu.BaiduMap`、`com.alibaba.android.rimet`、`com.tencent.wework` |
+
+**默认隐藏名单**：空。默认不做隐藏，用户显式勾选才生效（"宁少不多"的另一面：先不主动改变现状）。
+
+**自定义**：按包名添加/删除，导入支持一行一个包名，导出只导出 `pkg` + 可选 `label`。
+
+## A.2 剪贴板替身词库（起步）
+
+每池 8–10 条，长度 6–40 字，全部为可公开复述的日常内容，不含账号、地址、金额等任何可能被误当真实隐私的字符串。
+
+**购物池**（电商、比价类应用适用）
+1. `米白色 210 码 加厚款`
+2. `这个链接能便宜二十吗`
+3. `顺丰到付可以吗`
+4. `收货地址改到公司前台`
+5. `有没有 32G 的版本`
+6. `发票抬头开个人`
+7. `预售什么时候发货`
+8. `先加购物车，晚上再决定`
+9. `这个和上次买的有什么区别`
+
+**社交池**（IM、内容社区适用）
+1. `晚上七点老地方见`
+2. `文件我发群里了，记得看`
+3. `这个周末我有空，你呢`
+4. `刚才那个链接打不开了`
+5. `明天上午十点开会`
+6. `照片原图发我一份`
+7. `你说的那家店叫什么`
+8. `路上堵，晚到十分钟`
+9. `收到，我处理一下`
+
+**工具池**（效率、笔记、翻译类适用）
+1. `2026-11-21 14:30 项目周会`
+2. `待办：续费域名、备份相册`
+3. `端口 8080 被占用了`
+4. `把这段转成 Markdown`
+5. `订单号末四位 4471`
+6. `周二之前给回复`
+7. `这条先记下来，回头再看`
+8. `算一下三个人平摊多少`
+9. `明天记得带身份证`
+
+**选取规则**：`(uid, boot_id)` 做种子，**同一应用在同一次开机内始终给同一条**（来回变容易被判定异常），跨开机可换。每个池首位留给"看起来最普通"的那条。
+
+## A.3 默认策略表（首版）
+
+| 目标 | 默认 | 说明 |
+|---|---|---|
+| 输入法、系统框架、WatchCat 自身 | 放行 | 自伤最小化，剪贴板必须放行输入法 |
+| 其余全部应用 · 剪贴板 | 空 | 用户可在详情页逐应用切"放行/替身/阻断" |
+| 其余全部应用 · 应用列表 | 预置可见集 | 默认不隐藏；需要隐藏时按应用勾选 |
+| 新装应用 | 剪贴板空、列表预置集 | 与"隐私默认少给"一致 |
+
+---
+
+# 附录 B · v0.2 目录形态（意向，P0 建立）
+
+```text
+E:\codes\WatchCat\
+├─ app\                         唯一 APK：控制台 + LSPosed 模块（同一个包名）
+│  └─ src\main\java\...\watchcat\
+│     ├─ Ui.kt  AppsScreen.kt  MainActivity.kt        ← 复用
+│     ├─ DetailScreen.kt  LogScreen.kt  DiagScreen.kt ← 加"数据面"一节/一块
+│     ├─ Engine.kt  Shell.kt                          ← 权限面，原样保留
+│     ├─ policy\                                      ← 新增：策略编辑 / 导入导出 / remote preferences 读写
+│     └─ xposed\                                      ← 新增：极简 hook 入口（零 UI 依赖、零静态副作用、不引用上面任何 UI 类）
+│  └─ src\main\resources\META-INF\xposed\             ← 新增：modern API 的模块描述（取代 manifest 元数据）
+├─ module\                        Magisk 模块包（新增；只放 native 与脚本）
+│  ├─ module.prop  post-fs-data.sh  service.sh
+│  └─ libs\arm64-v8a\libwatchcat.so                   ← 由 Zygisk 加载
+├─ zig\                           同一份源码，两个编译目标
+│  ├─ src\watchcat.zig            ← 权限面导出（现有 8 个符号）
+│  └─ src\engine.zig              ← 数据面导出（wc_engine_*）
+├─ tools\build_so.py              编译 + 16KB 门禁（复用，加 engine 目标）
+├─ docs\hook方案-v0.2.md          本文件
+└─ .github\workflows\build.yml    一条流水线：APK（含模块 dex）+ 模块 zip（含 .so）
+```
+
+CI 的顺序：`assembleDebug` → `.so` 16KB 校验（**引擎与模块 lib 都算**）→ `zig test`（含 engine 单测）→ 打 `watchcat-module.zip` → 两个 artifact 成对上传。任一环失败即整条红，不允许"APK 绿、模块红"这种半成品出厂。
+
+依赖锁定：`libxposed` 的 module API / service API 以 submodule 引入，**固定到与 Vector stable 相同的 commit**，不用 `master`。
