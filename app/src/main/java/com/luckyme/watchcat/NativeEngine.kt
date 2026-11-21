@@ -6,7 +6,7 @@ package com.luckyme.watchcat
  * 硬约束（《安卓开发规范》W7）：导出函数 ≤ 8 个，一个函数一个职责。
  *
  * **类名即符号名**：`.so` 里导出的是 `Java_com_luckyme_watchcat_NativeEngine_*`，
- * 所以这个对象必须叫 `NativeEngine`，且这六个方法名不能再改 —— 改任一边都只会得到
+ * 所以这个对象必须叫 `NativeEngine`，且这七个方法名不能再改 —— 改任一边都只会得到
  * `No implementation found for ...`（那不是加载失败，是符号对不上）。
  *
  * 用 `object` 而不是 companion，是为了让方法名不被 Kotlin 做任何名字修饰；
@@ -35,4 +35,12 @@ object NativeEngine {
 
     /** 候选 op 表条数 */
     external fun nativeOpCount(): Int
+
+    /**
+     * 把 `appops get <pkg>` 的**原始输出**解析成 JSON（`{"count","skipped","ops":[…]}`）。
+     *
+     * 分工：命令由拿到授权的 Kotlin 侧执行，Zig 只做纯计算 —— 所以本函数在主机上可单测，
+     * 也不需要 .so 链 libc 或 fork。null 入参或内存不足时返回 null，调用方按「读失败」处理。
+     */
+    external fun nativeReadOps(raw: String?): String?
 }

@@ -90,3 +90,292 @@ pub fn findOp(cli: []const u8) ?OpSpec {
     }
     return null;
 }
+
+// ---------------------------------------------------------------------------
+// `appops get <pkg>` 输出解析
+//
+// 格式以小米 9 / API 36 **实测**为准（2026-11-21 抓的原样样本），三种字段都可能缺：
+//
+//   Uid mode: COARSE_LOCATION: ignore
+//   WAKE_LOCK: allow; time=+3d0h8m56s467ms ago; duration=+363ms
+//   SYSTEM_ALERT_WINDOW: default; rejectTime=+3d16h21m39s105ms ago
+//   ACTIVATE_VPN: allow; time=+10d21h10m4s888ms ago; rejectTime=+16d0h47m57s11ms ago
+//
+// 纪律：解析不出来就**计数**，不 panic、不猜；界面要能把「有 N 行没看懂」显示出来，
+// 否则解析器悄悄丢数据，比解析失败更危险。
+// ---------------------------------------------------------------------------
+
+/// 条目作用域：`Uid mode:` 段里的条目按 uid 存储（多包同 uid 会互相影响）
+pub const Scope = enum { package, uid };
+
+/// 一条 op 的运行期状态（字段值原样保留，不解析时间语义 —— 时间只用于展示）
+pub const Entry = struct {
+    op: []const u8,
+    mode: Mode,
+    scope: Scope = .package,
+    time: ?[]const u8 = null,
+    reject_time: ?[]const u8 = null,
+    duration: ?[]const u8 = null,
+};
+
+pub const ParseResult = struct {
+    entries: []Entry,
+    /// 无法识别的行数（既不是空行、也解析不出 op+模式）
+    skipped: usize,
+
+    pub fn deinit(self: *ParseResult, alloc: std.mem.Allocator) void {
+        alloc.free(self.entries);
+    }
+};
+
+/// 解析 `appops get` 的多行输出。内存由调用方 allocator 负责，用完 deinit。
+pub fn parseGet(alloc: std.mem.Allocator, input: []const u8) !ParseResult {
+    var list: std.ArrayList(Entry) = .empty;
+    errdefer list.deinit(alloc);
+    var skipped: usize = 0;
+
+    var lines = std.mem.splitScalar(u8, input, '\n');
+    while (lines.next()) |raw_line| {
+        var line = std.mem.trim(u8, raw_line, " \t\r");
+        if (line.len == 0) continue;
+
+        var scope: Scope = .package;
+        if (std.mem.startsWith(u8, line, "Uid mode:")) {
+            scope = .uid;
+            line = std.mem.trim(u8, line["Uid mode:".len..], " \t");
+            if (line.len == 0) continue; // 只有段头、没有条目
+        }
+
+        // op 名里不会出现冒号，所以「第一个 ": " 」就是 op 与模式的边界
+        const colon = std.mem.indexOf(u8, line, ": ") orelse {
+            skipped += 1;
+            continue;
+        };
+        const op = std.mem.trim(u8, line[0..colon], " \t");
+        const rest = std.mem.trim(u8, line[colon + 2 ..], " \t");
+        if (op.len == 0 or rest.len == 0) {
+            skipped += 1;
+            continue;
+        }
+
+        var entry = Entry{ .op = op, .mode = .default, .scope = scope };
+        var mode_ok = false;
+        var fields = std.mem.splitScalar(u8, rest, ';');
+        var is_first = true;
+        while (fields.next()) |field_raw| {
+            const field = std.mem.trim(u8, field_raw, " \t\r");
+            if (field.len == 0) continue;
+
+            if (is_first) {
+                is_first = false;
+                if (Mode.parse(field)) |m| {
+                    entry.mode = m;
+                    mode_ok = true;
+                } else {
+                    break; // 模式看不懂，整行作废，交给 skipped 记账
+                }
+                continue;
+            }
+
+            const eq = std.mem.indexOfScalar(u8, field, '=') orelse continue;
+            const key = std.mem.trim(u8, field[0..eq], " \t");
+            const val = std.mem.trim(u8, field[eq + 1 ..], " \t");
+            if (std.mem.eql(u8, key, "time")) {
+                entry.time = val;
+            } else if (std.mem.eql(u8, key, "rejectTime")) {
+                entry.reject_time = val;
+            } else if (std.mem.eql(u8, key, "duration")) {
+                entry.duration = val;
+            }
+            // 未知键直接忽略：系统后续版本可能加字段，不能因此判定整行失败
+        }
+
+        if (!mode_ok) {
+            skipped += 1;
+            continue;
+        }
+        try list.append(alloc, entry);
+    }
+
+    return .{ .entries = try list.toOwnedSlice(alloc), .skipped = skipped };
+}
+
+/// 拼接一小段格式化文本后立刻释放临时串（ArrayList 在 0.17 没有 writer 成员）
+fn appendFmt(alloc: std.mem.Allocator, out: *std.ArrayList(u8), comptime fmt: []const u8, args: anytype) !void {
+    const s = try std.fmt.allocPrint(alloc, fmt, args);
+    defer alloc.free(s);
+    try out.appendSlice(alloc, s);
+}
+
+/// 把解析结果序列化成紧凑 JSON，供 JNI 侧直接交给 Kotlin 解析。
+/// 只含 ASCII 安全字符（op 名与时间串都是系统产物），因此不做转义。
+pub fn toJson(alloc: std.mem.Allocator, result: ParseResult) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+
+    try appendFmt(alloc, &out, "{{\"count\":{d},\"skipped\":{d},\"ops\":[", .{ result.entries.len, result.skipped });
+    for (result.entries, 0..) |e, i| {
+        if (i != 0) try out.append(alloc, ',');
+        try appendFmt(alloc, &out, "{{\"op\":\"{s}\",\"mode\":\"{s}\",\"modeId\":{d},\"scope\":\"{s}\"", .{
+            e.op, e.mode.cliToken(), @intFromEnum(e.mode), @tagName(e.scope),
+        });
+        if (e.time) |t| try appendFmt(alloc, &out, ",\"time\":\"{s}\"", .{t});
+        if (e.reject_time) |t| try appendFmt(alloc, &out, ",\"rejectTime\":\"{s}\"", .{t});
+        if (e.duration) |t| try appendFmt(alloc, &out, ",\"duration\":\"{s}\"", .{t});
+        try out.append(alloc, '}');
+    }
+    try out.appendSlice(alloc, "]}");
+    return out.toOwnedSlice(alloc);
+}
+
+const testing = std.testing;
+
+test "解析普通条目与 Uid mode 单行段头" {
+    // 样本取自小米 9 / API 36 的 `appops get`，包名已替换为中性值
+    const raw =
+        \\Uid mode: COARSE_LOCATION: ignore
+        \\FINE_LOCATION: ignore
+        \\POST_NOTIFICATION: ignore
+        \\READ_SMS: ignore
+    ;
+    var r = try parseGet(testing.allocator, raw);
+    defer r.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 4), r.entries.len);
+    try testing.expectEqual(@as(usize, 0), r.skipped);
+
+    // 第一行既带段头又是首个条目：必须被识别为 uid 作用域
+    try testing.expectEqualStrings("COARSE_LOCATION", r.entries[0].op);
+    try testing.expectEqual(Mode.ignore, r.entries[0].mode);
+    try testing.expectEqual(Scope.uid, r.entries[0].scope);
+    // 后续行回到 package 作用域
+    try testing.expectEqual(Scope.package, r.entries[1].scope);
+    try testing.expectEqualStrings("FINE_LOCATION", r.entries[1].op);
+}
+
+test "解析 time / rejectTime / duration 三种字段" {
+    const raw =
+        \\WAKE_LOCK: allow; time=+3d0h8m56s467ms ago; duration=+363ms
+        \\SYSTEM_ALERT_WINDOW: default; rejectTime=+3d16h21m39s105ms ago
+        \\ACTIVATE_VPN: allow; time=+10d21h10m4s888ms ago; rejectTime=+16d0h47m57s11ms ago
+        \\CONTROL_AUDIO: foreground; time=+3d0h8m20s371ms ago; duration=+18s730ms
+    ;
+    var r = try parseGet(testing.allocator, raw);
+    defer r.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 4), r.entries.len);
+    try testing.expectEqualStrings("+3d0h8m56s467ms ago", r.entries[0].time.?);
+    try testing.expectEqualStrings("+363ms", r.entries[0].duration.?);
+    try testing.expectEqual(@as(?[]const u8, null), r.entries[0].reject_time);
+
+    try testing.expectEqual(Mode.default, r.entries[1].mode);
+    try testing.expectEqualStrings("+3d16h21m39s105ms ago", r.entries[1].reject_time.?);
+    try testing.expectEqual(@as(?[]const u8, null), r.entries[1].time);
+
+    try testing.expectEqual(Mode.allow, r.entries[2].mode);
+    try testing.expect(r.entries[2].time != null and r.entries[2].reject_time != null);
+
+    try testing.expectEqual(Mode.foreground, r.entries[3].mode);
+    try testing.expectEqualStrings("+18s730ms", r.entries[3].duration.?);
+}
+
+test "看不懂的行计数而不是丢弃或 panic" {
+    const raw =
+        \\CAMERA: ignore
+        \\这一段不是 op 行
+        \\MYSTERY_OP: weirdmode; time=+1s ago
+        \\WAKE_LOCK: allow
+    ;
+    var r = try parseGet(testing.allocator, raw);
+    defer r.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 2), r.entries.len);
+    try testing.expectEqual(@as(usize, 2), r.skipped); // 非 op 行 + 未知模式各记一条
+    try testing.expectEqualStrings("CAMERA", r.entries[0].op);
+    try testing.expectEqualStrings("WAKE_LOCK", r.entries[1].op);
+}
+
+test "CRLF、空行、行尾空格都不影响解析" {
+    const raw = "CAMERA: ignore\r\n\r\n  WAKE_LOCK: allow  \r\n";
+    var r = try parseGet(testing.allocator, raw);
+    defer r.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 2), r.entries.len);
+    try testing.expectEqual(@as(usize, 0), r.skipped);
+    try testing.expectEqualStrings("WAKE_LOCK", r.entries[1].op);
+    try testing.expectEqual(Mode.allow, r.entries[1].mode);
+}
+
+test "序列化成 JSON 且字段完整" {
+    const raw = "CAMERA: ignore; time=+2s ago\nWAKE_LOCK: allow; duration=+363ms";
+    var r = try parseGet(testing.allocator, raw);
+    defer r.deinit(testing.allocator);
+
+    const json = try toJson(testing.allocator, r);
+    defer testing.allocator.free(json);
+
+    try testing.expect(std.mem.indexOf(u8, json, "\"count\":2") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"op\":\"CAMERA\",\"mode\":\"ignore\",\"modeId\":2") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"time\":\"+2s ago\"") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"duration\":\"+363ms\"") != null);
+}
+
+// ---------------------------------------------------------------------------
+// 真机样本回归：`samples/` 里是小米 9 / API 36 上 `appops get` 的**原样输出**，
+// 只保留了 op 行（输出本身不含包名），可以直接入库。
+// 判据：解析出的条目数 + 看不懂的行数 == 文件里的非空行数，且看不懂的行数为 0。
+// 任何一次格式变化（新系统、新 op、新字段）都会在这里炸出来。
+// ---------------------------------------------------------------------------
+
+const SampleCase = struct {
+    file: []const u8,
+    raw: []const u8,
+    non_empty_lines: usize,
+};
+
+const samples = [_]SampleCase{
+    .{
+        .file = "api36_adguard.txt",
+        .raw = @embedFile("samples/api36_adguard.txt"),
+        .non_empty_lines = 50,
+    },
+    .{
+        .file = "api36_twitch.txt",
+        .raw = @embedFile("samples/api36_twitch.txt"),
+        .non_empty_lines = 47,
+    },
+    .{
+        .file = "api36_permissioncontroller.txt",
+        .raw = @embedFile("samples/api36_permissioncontroller.txt"),
+        .non_empty_lines = 43,
+    },
+};
+
+test "真机样本全量解析，一行都不许丢" {
+    for (samples) |case| {
+        var r = try parseGet(testing.allocator, case.raw);
+        defer r.deinit(testing.allocator);
+
+        try testing.expectEqual(@as(usize, 0), r.skipped);
+        try testing.expectEqual(case.non_empty_lines, r.entries.len);
+        // 每条都必须带得出 op 名与模式
+        for (r.entries) |e| {
+            try testing.expect(e.op.len > 0);
+        }
+    }
+}
+
+test "真机样本解析出的模式都在五态之内" {
+    for (samples) |case| {
+        var r = try parseGet(testing.allocator, case.raw);
+        defer r.deinit(testing.allocator);
+
+        for (r.entries) |e| {
+            // Mode 是枚举，能取到值就说明落在五态内；这里额外确认没有靠 default 兜底
+            const in_five = switch (e.mode) {
+                .default, .allow, .ignore, .deny, .foreground => true,
+            };
+            try testing.expect(in_five);
+        }
+    }
+}

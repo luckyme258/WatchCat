@@ -35,13 +35,21 @@ class MainActivity : Activity() {
             val m9 = NativeEngine.nativeModeName(9)
             val ops = NativeEngine.nativeOpCount()
 
+            // 解析一项：把一小段 appops 输出丢进去，看 Zig 侧能否给出 JSON。
+            // 样本刻意包含「段头与条目同行」和「带 time 字段」两种真实形态。
+            val sample = "Uid mode: COARSE_LOCATION: ignore\nCAMERA: deny; time=+1d2h3m ago"
+            val json = NativeEngine.nativeReadOps(sample)
+
             val ok = ver == 0x00010000 &&
                 ping == 0x5743 &&
                 "watchcat/0.1.0" == tag &&
                 jniVer >= 0x00010006 &&
                 "忽略（给空数据）" == m2 &&
                 "?" == m9 &&
-                ops > 0
+                ops > 0 &&
+                json != null &&
+                json.contains("\"count\":2") &&
+                json.contains("\"skipped\":0")
 
             sb.append(if (ok) "LOAD: PASS\n\n" else "LOAD: FAIL\n\n")
             sb.append(String.format(Locale.US, "version    = 0x%08x%n", ver))
@@ -51,6 +59,8 @@ class MainActivity : Activity() {
             sb.append("modeName(2)= ").append(m2).append('\n')
             sb.append("modeName(9)= ").append(m9).append('\n')
             sb.append("opCount    = ").append(ops).append('\n')
+            sb.append("readOps    = ")
+                .append(if (json == null) "null（解析失败）" else json).append("\n\n")
 
             Log.i(TAG, sb.toString().replace('\n', ' '))
         } catch (e: Throwable) {
