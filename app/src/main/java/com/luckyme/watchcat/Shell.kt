@@ -25,6 +25,11 @@ object Shell {
      *
      * @param timeoutMs 首次调用会弹 Magisk 授权框，用户不点就一直等 —— 所以要超时，
      *                  不能把界面线程或后台线程无限挂住。
+     *
+     * 为什么必须是「边跑边收」而不是「先 waitFor 再读」：
+     * pipe 容量只有 64KB，`dumpsys package <pkg>` 这类大输出会把 pipe 写满，
+     * 子进程卡在 write 上永不退出 → waitFor 等到超时 → 结果被 destroyForcibly 截断。
+     * 2026-11-21 真机表现就是「详情页转 10 秒、权限全显示未读到」，根因在这里。
      */
     fun su(cmd: String, timeoutMs: Long = 10_000): Result {
         var p: Process? = null
@@ -32,18 +37,27 @@ object Shell {
             p = ProcessBuilder("su", "-c", cmd)
                 .redirectErrorStream(true)
                 .start()
-            // 先等退出再收输出：首次会弹 Magisk 授权框，若先读 pipe 会一直阻塞在 readLine 上，
-            // 超时机制就失效了。appops get 的输出远小于 pipe 容量（64KB），不会互锁。
-            val finished = p.waitFor(timeoutMs, TimeUnit.MILLISECONDS)
             val out = StringBuilder()
-            runCatching {
-                p.inputStream.bufferedReader().use { r -> r.forEachLine { out.append(it).append('\n') } }
-            }
+            val proc = p
+            val reader = Thread {
+                runCatching {
+                    proc.inputStream.bufferedReader().use { r ->
+                        r.forEachLine { line ->
+                            synchronized(out) { out.append(line).append('\n') }
+                        }
+                    }
+                }
+            }.apply { isDaemon = true; name = "watchcat-su-reader" }
+            reader.start()
+
+            val finished = proc.waitFor(timeoutMs, TimeUnit.MILLISECONDS)
+            if (!finished) proc.destroyForcibly()
+            reader.join(if (finished) 500 else 2_000)
+            val text = synchronized(out) { out.toString() }
             if (!finished) {
-                p.destroyForcibly()
-                Result(cmd, -1, out.toString(), timedOut = true)
+                Result(cmd, -1, text, timedOut = true)
             } else {
-                Result(cmd, p.exitValue(), out.toString(), timedOut = false)
+                Result(cmd, proc.exitValue(), text, timedOut = false)
             }
         } catch (e: Throwable) {
             // 没装 su / 被 root 管理器直接拒，都在这里体现

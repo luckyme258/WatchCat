@@ -65,7 +65,8 @@ object Engine {
 
     /** 读运行时权限：granted 与 flags（SYSTEM_FIXED 的权限 pm 也改不动） */
     fun readPerms(pkg: String): Map<String, PermState> {
-        val out = Shell.su("dumpsys package $pkg").output
+        // dumpsys 输出可能是几百 KB，给足时间；10 秒会在大包上被截断（见 Shell.su 注释）
+        val out = Shell.su("dumpsys package $pkg", timeoutMs = 20_000).output
         val map = HashMap<String, PermState>()
         for (line in out.lineSequence()) {
             val t = line.trim()
