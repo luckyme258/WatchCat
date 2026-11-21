@@ -28,10 +28,22 @@ object Engine {
         val msg: String = "",
     )
 
-    /** 当前身份；界面顶部要常显（W10.1）。只认 uid=0，不看有没有 su 文件 */
+    /**
+     * 当前身份；界面顶部要常显（W10.1）。以真正执行 `su -c id` 为准（只认 uid=0）。
+     *
+     * 不能先用 File.exists 判断 su 在不在：Magisk 会按挂载命名空间 / DenyList 把 su 藏起来，
+     * App 里 stat 那几个固定路径经常是假阴性（0.3.0 真机一律显示「未检测到 su」，但 root 其实已授）。
+     * 所以直接 probe，再用失败形态区分「真没装」和「装了但没授权」。
+     */
     fun identity(): String {
-        if (!Shell.hasSuBinary()) return "none"
-        return if (Shell.isRoot(Shell.probeRoot())) "root" else "denied"
+        val r = Shell.probeRoot()
+        if (Shell.isRoot(r)) return "root"
+        val out = r.output
+        val noSu = out.contains("Cannot run program") ||
+            out.contains("No such file") ||
+            out.contains("IOException") ||
+            out.contains("error=2")
+        return if (noSu) "none" else "denied"
     }
 
     fun identityText(): String = when (identity()) {
