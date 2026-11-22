@@ -403,6 +403,8 @@ P0 的四条里 **① 与 ③ 已结项**：① 的结论是"Zig 只留哨兵"�
 10. **P2 证据通道待定**（`docs/应用列表-API核对.md` §8）：钩子在应用 uid，写不了 `/data/system`；候选是"目标私有目录落盘 + App 用 su 归集"或"显式广播"，定案后要补一条 L15 例外，未定之前不写代码。
 11. **ROM 特征包进 P2 判定层**（§5.5）：显式 `rom=yes` + 前缀 `org.lineageos.` + 两个精确名；排序在系统应用保护之前（唯一一次破例）。边界固定：不碰 `Build` 静态字段、不碰 native 属性读取、不碰 Key Attestation，对外只承诺"经 PackageManager 的包可见性被接管"。顺带记一条实测：**模块可以把自己注入自身进程**（用 `cli scope add <self>` 即可），列表面验证就是靠它当驱动器。
 12. **`scope.list` 的 `staticScope` 教训**：`META-INF/xposed/module.prop` 写 `staticScope=true` 时 Vector 拒绝任何用户扩展作用域（`fixes its scope in module.prop`），且无任何报错，表现为"模块已启用但目标从不注入"。P2 这种"按目标应用生效"的形态必须 `staticScope=false`，规范 L6 已落档。
+13. **P2 策略按目标分键**（0.5.3）：remote prefs group `p2`、键 `policy.<目标包名>`。不能共用一个 `policy` 键——一个模块一份 group，共用等于"给 A 配的名单也套到 B 上"。保存必须写当前 `bootId` 并**回读校验**（`apply` 异步，不信返回值）；钩子侧读取顺序 `policy.<pkg>` → 旧单键 `policy` → 目标私有目录文件。
+14. **读别的应用私有目录必须 `su -M`**（0.5.4）：应用进程有自己的 mount namespace，里面看不到 `/data/user/0/<别的应用>`，于是 `su -c cat …` 变成"命令跑成功、`cat` 静默 `exit=1`"，页面显示成"读 marker 失败：exit=1"。读 marker/事件一律走全局挂载 ns，失败文案要区分"读不到目录"与"还没有 marker"。规范 L15 的例外条款随之下沉到 `Shell.suMount`。
 
 **已定（2026-11-21）**
 
@@ -444,6 +446,28 @@ P0 的四条里 **① 与 ③ 已结项**：① 的结论是"Zig 只留哨兵"�
 2. `stop` 与 `start` 拆成两条执行会黑屏失联（L18.6）。必须一条命令连写，一次开机窗口只做一次。
 
 **替身内容的核对口径（尚未做屏幕级核对，别当成已验）**：替身文本本身只做到"单测级"——`ClipPolicyTest` 覆盖了同 `(uid, bootId)` 稳定、6–40 字；真机上只验到"应用拿到的是非空 ClipData（因此继续 `CLIP`）"。想在屏幕上直接看到那条文本很难：淘宝的粘贴提示在 WebView 里，`uiautomator dump` 导不出来。真要验内容，得加一个自建的读取靶子（App 内"剪贴板自检"），那要再走一轮 CI。
+
+### 13.2 P2 目标应用管理页真机验收（2026-11-22，0.5.3 → 0.5.4）
+
+**页面结构**：`MainActivity` 四个页签——应用 / 目标 / 日志 / 诊断。目标页两张视图：列表（`三方应用` / `含系统应用` 两个筛 + `刷新`，`已配置` 打标）与编辑器（目标信息 + 作用域卡 + 策略卡 + 运行状态卡）。返回键在编辑器里回列表，不停在列表就退出。
+
+**下发链路（现读现写，没有缓存）**：
+
+| 步骤 | 实现 | 真机证据 |
+|---|---|---|
+| 读作用域 | `FrameworkState.snapshot()?.scope` | 编辑器直接显示"已在作用域：框架会在这个应用的所有进程里注入" |
+| 加作用域 | `XposedService.requestScope(listOf(pkg), OnScopeEventListener)` 优先，失败落 `vector-cli scope add` | 按钮只在 `inScope==false` 时出现；回调文案区分"框架批准 / 框架拒绝·已改走 CLI" |
+| 写策略 | `P2Store.save` → remote prefs `p2` / `policy.<pkg>`，`commit()` 后立刻回读 | 框架 DB `configs` 行：`('com.luckyme.watchcat', 0, 'p2', 'policy.com.taobao.taobao', …)`，内容 `version=1 / armed=yes / bootId=bbfa59ab… / mode=hide / hide=com.lerist.andvm,com.mfcloudcalculate.networkdisk / show= / rom=yes` |
+| 重启目标 | `am force-stop` + `monkey -l` | 淘宝 marker：`armed=yes`、`policy=ok`、`mode=hide`、`rom=yes`、`hide=2`、`hooked=70`、`gateBootId` 与当前 bootId 一致、`app=0.5.3 (8)`、`pid=8032` |
+| 回读注入 | `su -M cat` marker + `tail` 事件 | 0.5.3 上这里踩坑（见下），0.5.4 改 `suMount` |
+
+**本轮踩到并修掉的坑**：应用进程的 mount namespace 里没有 `/data/user/0/<别的应用>`，`su -c "cat …"` 会"命令跑成功、`cat` 静默 `exit=1`"，页面于是显示"读 marker 失败：exit=1"（同一秒 `run-as` 走 shell 的 ns 却能正常读，所以极容易误判成权限/SELinux）。0.5.4 把读取改成 `su -M -c`，并把失败文案拆成"读不到目标私有目录（su -M exit=N）"与"还没有 marker：目标没启动过或没进作用域"。
+
+**仍未闭环的两点（如实记）**：
+
+1. 本轮 hide 名单选的是 `com.lerist.andvm` / `com.mfcloudcalculate.networkdisk`，淘宝启动后并没有查询这两个包，所以 `events.jsonl` 没有新增判定行——**"隐藏命中"这一环只有 marker 级证据，缺一次调用级证据**。要补，得把名单换成淘宝确实会查的包（历史上 `com.tencent.mm` / `com.eg.android.AlipayGphone` 会出 `api=getPackageInfo act=nnf`）。
+2. 远程 prefs 的更新对**已运行的注入进程**是否即时可见仍未实测（`RemotePreferences` 在目标侧是本地快照 + binder 更新），页面文案只承诺"首次生效必须冷启动"。
+
 
 ---
 
