@@ -1,15 +1,15 @@
 # WatchCat v0.2 · 数据面（Hook）实施底稿
 
-> 状态：**架构已定，未动代码**
-> 日期：2026-11-21
-> 决策已定：走 Vector（最新 LSPosed）｜Zig 参与 hook 侧｜接受"不自动生效 + 连续异常停用"兜底｜接受"system 侧读 root 文件、应用侧接受名单可见"的折中｜接受"自洽原则""不压系统提示"四条硬规矩
+> 状态：**架构已定；P0 ① 与 P1 已真机验收（2026-11-22）；判定层按 L16 定为 Kotlin/JVM，Zig 退出热路径**
+> 日期：2026-11-21（首版）/ 2026-11-22（判定层归属修订）
+> 决策已定：走 Vector（最新 LSPosed）｜**判定与 hook 全在 Kotlin/JVM，native 只留哨兵**｜接受"不自动生效 + 连续异常停用"兜底｜接受"system 侧读 root 文件、应用侧接受名单可见"的折中｜接受"自洽原则""不压系统提示"四条硬规矩
 > 追加决策（2026-11-21）：**P0 先做 Zig 进 system_server 的加载探针**｜分发形态定为 **控制台 APK + Magisk/Zygisk 模块包**｜默认值走 **预置数据集**（见附录 A）｜替身内容 **自建词库先起个头**（见附录 A）｜审计 **只做简版历史 + 汇总**
 
 ---
 
 ## 0. 一句话结论
 
-v0.2 只做两件事：**剪贴板（system_server 单点注入）** 与 **应用列表（应用内注入）**。前者风险最小、收益最直接，作为第一条主线；后者必须成套做（列表 + 单点 + Intent 三件套），单独做列表等于主动留破口。Zig 的角色是**规则判定引擎**，Kotlin 是 hook 适配层，两者通过 C ABI 分工；Zig 能否真的进到 system_server，是 P0 探针要回答的第一个问题。
+v0.2 只做两件事：**剪贴板（system_server 单点注入）** 与 **应用列表（应用内注入）**。前者风险最小、收益最直接，作为第一条主线；后者必须成套做（列表 + 单点 + Intent 三件套），单独做列表等于主动留破口。**判定与 hook 都在 Kotlin/JVM 一侧**（同一进程内的纯函数，无 IO、无 JNI）；Zig 只在数据面保留「我在这份进程里活着」的哨兵与构建期工具，不参与任何一次判定（L16.2.1）。Zig 能不能进 system_server 这件事已经由 P0 探针回答完了：能，`ping=0x5743` 已实测——所以它不需要承担判定，也仍然是我们确认「链对了」的唯一凭据。
 
 ---
 
@@ -33,24 +33,24 @@ watchcat.apk   一个 APK，两种身份（LSPosed 模块要求配置属于模�
   ├─ 控制层：写 remote preferences（框架托管）；不参与任何运行时判定
   └─ hook 层：极简入口类，onSystemServerStarting / onPackageReady
               · 定位注入点、枚举同名重载、取调用 uid
-              · 零静态状态、零 UI 依赖、失败即放行（fail-open）
-                    │ JNI（C ABI，纯函数，按 handle 实例化）
+              · 判定也在这里，纯 Kotlin 函数：decide(uid, kind) -> allow|empty|fake|block
+                filter(uid, pkgs[]) -> 保留子集 ／ pick(uid, scene, seed) -> 假数据内容
+              · 零静态状态、零 UI 依赖、零 IO、失败即放行（fail-open）
+                    │ 无 JNI：判定链上不存在任何 native 调用
 watchcat-module.zip   Magisk 模块（只放 native 与脚本，不含判定逻辑）
   └─ libwatchcat.so（由 Zygisk 加载，不是 System.load）
+                    · 只导出哨兵：wc_engine_ping / wc_engine_version
 zig/  同一份源码，两个编译目标
   ├─ watchcat.zig  → 权限面导出（nativeReadOps / nativeWriteOp …，现有 8 个）
-  └─ engine.zig    → 数据面导出（wc_engine_*）
-                    · decide(uid, kind) -> allow|empty|fake|block
-                    · filter(uid, pkgs[]) -> 保留子集
-                    · pick(uid, scene, seed) -> 假数据内容
+  └─ engine.zig    → 数据面只剩哨兵（ping / version）+ 构建期工具（策略与词库编译）
 ```
 
-三层各管一件事，**任何一层都不许替另一层做决定**：UI 只写策略不判定；hook 层不算业务；Zig 不碰 Android API（无 JNI 反向调用），输入输出全是纯数据。
+三层各管一件事，**任何一层都不许替另一层做决定**：UI 只写策略不判定；hook 层只回答「这一次调用该给什么」并且必须是纯函数（读不可变快照、不算业务外的东西）；native 不参与判定、不碰 Android API，只在构建期与哨兵上出现。
 
 三个必须记住的工程事实：
 
-1. **`.so` 会被加载两次**（App 进程一次、system_server 一次），所以引擎必须“按 handle 实例化、无全局可变状态”，禁止“初始化一次到处用静态变量”。
-2. **`.so` 里并存两组符号**，前缀分开（`native*` = 权限面拼命令，`wc_engine_*` = 数据面纯判定），且来自两个互不依赖的编译单元，避免语义互相污染。
+1. **`.so` 会被加载两次**（App 进程一次、system_server 一次）。收缩成哨兵之后它没有状态，谁加载都只是返回一个常量；但这条也说明：**一旦有人往里加判定逻辑，它就立刻变成 bug 源**（两份状态、两份解释）。所以 L16 把它冻结成只读哨兵，而不是"再加一点也无所谓"。
+2. **`.so` 里并存两组符号**，前缀分开（`native*` = 权限面拼命令，`wc_engine_*` = 数据面哨兵），且来自两个互不依赖的编译单元。
 3. **hook 侧代码与 UI 代码同在一个 APK 但不得互相引用**：UI 类一旦在目标进程被初始化（拿 Context、读资源）就会拖崩别人，2.1 的 `XResources`/`findClass` 事故就是先例。
 
 ### 2.1 与 v0.1 的整合边界
@@ -85,15 +85,18 @@ zig/  同一份源码，两个编译目标
 
 ---
 
-## 3. 为什么 Zig 放这个位置（以及它的真实极限）
+## 3. 判定为什么放在 Kotlin（原「Zig 做判定引擎」已撤回）
 
-先说实话：**性能不是理由**。剪贴板判定量级是"每分钟几十次"，应用列表过滤是"每次几百条"，Kotlin 做这两件事毫无压力。Zig 在这里的价值是三条：
+**性能从来不是理由——这一点首版就写了，结论没变**：剪贴板判定量级是"每分钟几十次"，应用列表过滤是"每次几百条"，Kotlin 做这两件事毫无压力。首版给 Zig 的三条价值，按 L16.3 的账本逐条算下来都换不回一次真机回环：
 
-1. **确定性**：无 GC、无运行时、同一输入永远同一输出，适合"判定"这种必须可复现的逻辑；
-2. **可单测**：`zig test` 能在 CI 里跑纯逻辑（现有 4 个单测就是这么来的），而 hook 侧的行为只能在真机上碰运气；
-3. **一处实现两处用**：同一份判定代码，system_server 里用一次、目标应用进程里用一次，行为不会漂移。
+- **确定性**：判定就是"读一张不可变策略表 + 比两个整数"。Kotlin 里只要不用 `HashMap` 的迭代顺序、不掺随机数，同样可复现。
+- **可单测**：JVM 单测在 CI 里跑，比 `zig test` 更快也更容易断言（策略为空、uid 是输入法、包名缺失这类场景，真机上根本造不出来）。
+- **一处实现两处用**：这条已经从假设变成事实——`.so` 确实在两个进程里各加载了一次（P0 已证）。但"能两处用"不等于"必须两处用"：剪贴板只有 system_server 一个消费方，应用列表也只有被注入进程一个消费方，**根本没有第二处**。
+- **修改成本**：改一行判定逻辑，JVM 是 push → CI → install → `stop/start`，约 20 秒见结果；native 要重编 shim、重打 zip、`ksud module install`、整机重启，8–10 分钟一轮，失败形态还是静默的。
 
-**极限**：Zig 进不了 `system_server` 这件事本身有风险，取决于 SELinux 与加载路径，**必须在 P0 用探针证实**，不能假设。我们已有的 `.so` 导出（`nativePing` / `nativeVersion`）正好可以当这个探针——能 ping 通，就说明加载链成立。
+结论（L16.2.1）：**业务判定不许放 native。** native 在这条链上只剩两个合法形态——`ping`/`version` 哨兵，以及构建期工具（真需要时把策略与词库编译成紧凑 blob）。
+
+**首版担心的"极限"已经不成立**：`ping=0x5743`、`version=0x00020000` 已在小米 13 的 system_server（pid 1996）里实测拿到（提交 `68ec8d0`，证据见《P0-骨架.md》与《框架兼容性核对.md》6.1）。加载链成立已证完，"进不去就退回 Kotlin"这条退路不必再等证伪，直接按主路径走。
 
 ### 3.0 Vector 事实基线（已核对作者仓库，2026-11-21）
 
@@ -119,7 +122,7 @@ zig/  同一份源码，两个编译目标
 | **A. Zygisk 模块（唯一方案）** | Magisk/KernelSU 的 Zygisk 在 zygote fork 阶段注入；Vector 本身也是 Zygisk 模块，二者共存于同一 Zygisk 环境 | **采用** |
 | ~~B. Vector 内 `System.load`~~ | 由被注入的 Java 层 `dlopen` 我们 APK 里的 lib | **废弃**：Vector 修 dex2oat 时都要用 `memfd_create` 绕 bionic 命名空间限制（v2.0 release notes），说明"从可写目录 dlopen"在 Android 10+ 本来就不可靠 |
 
-所以 Zig 的 `.so` 必须由 Zygisk 加载，**不是**由我们的 Java 代码 `System.load`。若这条在 P0 证伪，退路是**剪贴板判定退回 Kotlin，Zig 只保留"离线编译策略 blob + 词库"**（仍在链路里，但不在热路径）。
+所以 Zig 的 `.so` 必须由 Zygisk 加载，**不是**由我们的 Java 代码 `System.load`。这条已在 P0 证实成立；而判定层已按 L16 定在 Kotlin，Zig 不再承担热路径，只剩哨兵与构建期工具。
 
 **API 基线定为 101，不追 102。** 理由：101 在 2.1/2.2 上都支持；102 的收益是"代码热替换"，而我们的热更新对象是**规则**不是代码——规则变更走 remote preferences + 引擎 reload 就能生效，不值得为此把最低框架版本抬到 2.2。
 
@@ -226,8 +229,8 @@ Android 11 起 `<queries>` 让"应用只能看到一部分应用"成为常态，
 |---|---|---|---|
 | system_server（剪贴板） | 框架 remote preferences（模块包提供） | 目标应用读不到（**待靶子实测确认**） | 判定在 system 侧，本来也不需要目标进程持有名单 |
 | 目标应用进程（应用列表） | 同一份 remote preferences | 同上 | 注入进来的是模块代码，取配置走框架接口 |
-| native（Zig） | Java 侧把配置转成紧凑 blob 后经 JNI 传入 | — | native 不碰文件、不碰框架 API，符合"Zig 不反向调 JVM" |
-| 兜底文件通道 | `/data/misc/watchcat/policy.bin`（`0640 root:system`） | 普通应用读不到 | **仅在"native 需在 Java 层之前拿到配置"这种特殊场景才用**，SELinux 是否允许 system_server 读该目录需 P0 实测 |
+| native（Zig） | **不再消费策略**（只留哨兵） | — | 判定在 Kotlin 侧读同一份 remote preferences，native 与策略彻底解耦（L16） |
+| 兜底文件通道 | `/data/system/watchcat.policy.bin`（`0600 system:system`） | 普通应用读不到 | **已实测可写**（P0 探针落的就是这个目录）。`/data/misc/watchcat` 未实测、不再作为候选；`/data/adb` 写不进（`0700 root:root`，uid 1000 过不了 DAC） |
 
 **明确禁止**：把策略放 `/sdcard`、`/data/local/tmp`，或做成"人人可读的明文 JSON"。那等于挂个牌子告诉应用"你正在被骗"。
 
@@ -237,32 +240,20 @@ Android 11 起 `<queries>` 让"应用只能看到一部分应用"成为常态，
 
 ---
 
-## 7. Zig 引擎接口草案（只定语义，不写实现）
+## 7. native 侧接口（按 L16 收缩 · 原判定草案作废）
 
-原则：**按 handle 实例化、纯函数、不反向调 JVM、热路径零分配（预分配 arena）**。`.so` 会被两个进程各加载一次，所以任何全局可变状态都是 bug。
-
-**生命周期（P0 只用这三个符号，先证明加载链）**
+原则：**哨兵无状态、纯常量、可任意次数加载**。"按 handle 实例化"的设计随判定一起撤掉——它当初存在的唯一理由就是"一个进程一份判定表"，而判定已经不在 native 了。
 
 | 函数 | 输入 | 输出 | 说明 |
 |---|---|---|---|
-| `wc_engine_ping()` | — | `0x5743` | 固定魔数，用来证明"我在这个进程里活着" |
-| `wc_engine_create(path)` | 策略 blob 路径 | handle / null | 每个进程各建一个实例；路径读不到就返回 null（调用方据此放行） |
-| `wc_engine_destroy(h)` | handle | — | 进程退出前释放，不做也行（系统会回收） |
+| `wc_engine_ping()` | — | `0x5743` | 固定魔数，证明这份 shim 链的是本仓库的引擎 |
+| `wc_engine_version()` | — | `0x00020000` | 版本口径，报障时用来对齐"你装的是哪一版" |
 
-**判定（A/B 阶段才用）**
+**已撤回（不再实现）**：`wc_engine_create` / `destroy` / `reload`、`wc_clip_decide`、`wc_clip_pick`、`wc_app_visible`、`wc_app_filter`、`wc_stats_push`。撤回依据是 L16.2.1「业务不得放 native」；原先为防漂移写的 "`wc_app_filter` 与逐条 `wc_app_visible` 必须等价" 那条单测也随之作废——现在只有一条路径，不存在两条。
 
-| 函数 | 输入 | 输出 | 说明 |
-|---|---|---|---|
-| `wc_engine_reload(h)` | handle | 0/-1 | 热更新，失败保留旧表 |
-| `wc_clip_decide(h, uid, pkg)` | handle + uid + 包名 | `0 放行 / 1 空 / 2 替身 / 3 阻断` | 剪贴板唯一决策入口 |
-| `wc_clip_pick(h, uid, scene, seed)` | handle + uid + 场景 + 种子 | 字符串 | 同一 (uid, seed) 必须稳定 |
-| `wc_app_visible(h, uid, pkg)` | handle + uid + 包名 | bool | 单点/Intent 面用 |
-| `wc_app_filter(h, uid, in[], n, out_bitmap)` | handle + uid + 包名数组 | 保留位图 | 列表面用，避免逐条 JNI 往返 |
-| `wc_stats_push(h, uid, kind)` | handle + uid + 类型 | — | 可选：计数留在 native，Kotlin 定时取走 |
+**仍然成立的单测口径**：Kotlin 判定层做表驱动单测进 CI（给定策略 + uid → 期望三态 / 期望保留集）。覆盖面比 `zig test` 更大，因为它能造真机造不出的输入。
 
-**单测口径**（进 CI，`zig test`）：给定策略 + 给定 uid，决策必须与期望表逐条一致；`wc_app_filter` 对 1000 条输入的结果必须与逐条 `wc_app_visible` 完全等价（防止两条路径漂移）。
-
-**16KB**：`.so` 必须过现有门禁（`tools/build_so.py` 已校验），且 ABI 只保留 `arm64-v8a`（省体积，也省一个对齐面）。
+**16KB**：`.so` 必须过现有门禁（`tools/build_so.py` 已校验），ABI 只保留 `arm64-v8a`。
 
 ---
 
@@ -299,10 +290,10 @@ Magisk/KernelSU 的具体版本门槛来自第三方指南、作者 README 只�
 
 所有 hook 回调外层包"异常 → 走原逻辑"。**判定失败一律放行，绝不返回错误值。** 只有用户显式选"阻断"模式时才允许抛异常，且要在 UI 上标注"可能让应用崩溃"。
 
-### 8.4 需要 P0 实测的两个点
+### 8.4 原「需要 P0 实测的两个点」（已结项）
 
-- system_server 在 SELinux 下能写哪些路径（心跳、`armed` 读取路径都依赖它）；
-- 若 system_server 完全写不了，退化方案：心跳改由 root 侧脚本在开机后主动"探测"（例如查 `/proc/<pid>/maps` 里有没有我们的 .so），失败计数改由脚本维护。
+- **system_server 能写哪些路径**：已测。`/data/system/watchcat.*` 可写（`0600 system:system`）；`/data/adb/watchcat` 是 `0700 root:root`，uid 1000 被 DAC 直接拒绝——**不能当 system_server 的落点**，这正是"回调没被调用"那轮误判的根因。`/data/misc/watchcat` 未测，不再候选。
+- **"完全写不了"的退化方案**：不需要了。心跳与闸门按 L17 落 `/data/system`，root 侧脚本只负责"这次开机跑过没有"，两边各写各的、不互相猜。
 
 ---
 
@@ -329,12 +320,12 @@ Magisk/KernelSU 的具体版本门槛来自第三方指南、作者 README 只�
 
 | 阶段 | 内容 | 产出 | 估时 |
 |---|---|---|---|
-| **P0 探针**（已定，先做这条） | ① Zygisk 模块骨架能否把 Zig `.so` 带进 system_server 并 `nativePing` 通；② 剪贴板方法族真实签名打点；③ system_server 在 SELinux 下的可读/可写路径（`/data/misc` vs `/data/system`）；④ Vector 在本机的作用域与热生效 | 一页探针报告 + 真机证据 | 0.5 天 |
-| **A 剪贴板** | 三态决策 + 输入法放行 + 审计 + 热生效 | 可用的剪贴板保护 | 1–2 天 |
+| **P0 探针**（① ③ 已结项，② ④ 并入 A 阶段） | ① Zygisk 模块骨架能否把 Zig `.so` 带进 system_server 并 `nativePing` 通（**✔ 已验收**）；② 剪贴板方法族真实签名打点；③ system_server 在 SELinux 下的可读/可写路径（**✔ 已验收：`/data/system` 可写**）；④ Vector 在本机的作用域与热生效 | 一页探针报告 + 真机证据 | 0.5 天 |
+| **A 剪贴板** | 三态决策（Kotlin 判定）+ 输入法放行 + 审计 + 热生效 | 可用的剪贴板保护 | 1–2 天 |
 | **B 应用列表** | 四面覆盖 + 自洽 + 名单编辑/导入导出 | 可用的列表伪造 | 2–4 天 |
 | **C 打磨** | 分池词库、简版审计页、自动停用 UI、诊断页接入 | 收尾 | 1–2 天 |
 
-P0 的四条按顺序做，**任一条证伪就当场改设计**，不硬推。第 ① 条决定 Zig 的参与形态，第 ③ 条决定心跳与闸门放哪，这两条最可能推翻细节。
+P0 的四条里 **① 与 ③ 已结项**：① 的结论是"Zig 只留哨兵"（L16），③ 的结论是"心跳与闸门落 `/data/system`"（L17）。剩下 ②（方法族真实签名打点）与 ④（作用域与热生效）不单独开一轮，边做 A 阶段边补。
 
 每阶段都走 CI 出包、真机装、靶子验，**不在本机出包**（G0.0）。
 
@@ -345,7 +336,7 @@ P0 的四条按顺序做，**任一条证伪就当场改设计**，不硬推。�
 | 风险 | 触发条件 | 缓解 |
 |---|---|---|
 | system_server 起不来 | 钩子写坏/加载失败 | 不自动生效 + 两次无心跳停用 + fail-open |
-| Zig lib 进不去 system_server | SELinux/加载路径 | 形态 B 退路；再不行判定退回 Kotlin |
+| Zig lib 进不去 system_server | SELinux/加载路径 | **已消除**：P0 实测 `ping=0x5743` 通过；且判定本就不在 native，即使哪天加载链复发也不影响功能 |
 | 剪贴板被"读空"识别 | 应用把 null 当异常 | 默认空 + 可切替身 + 分池词库 |
 | 列表不自洽被抓 | 只做列表不做单点 | 四面覆盖 + 靶子交叉校验门禁 |
 | 反作弊/银行类误伤 | 注入痕迹 | 作用域最小化（只勾目标应用）＋ 明确不做隐藏痕迹 |
@@ -370,12 +361,20 @@ P0 的四条按顺序做，**任一条证伪就当场改设计**，不硬推。�
 10. **框架依赖锁定**：`libxposed` module API / service API 两个 submodule 固定到与 Vector 当前 stable 相同的 commit，不跟随 master 漂移（作者 README 明确建议开发者 check out 同一 commit）。
 11. **框架基线**：模块声明 API 101；运行时要求 Vector ≥ 2.1。低于基线一律拒绝启用，不允许"降级到 legacy 82 凑合用"。
 12. **hook 侧构建禁混淆**：R8 不得触及 hook 侧类（2.1 的 `XResources` 被合并导致 `system_server` 里 `findClass` 永久失败就是先例），且 hook 侧禁止依赖资源系统。
+13. **判定层归属**：业务判定一律在 Kotlin/JVM 的纯函数里，native 不得实现任何 `decide/filter/pick` 语义（L16.2.1）；native 只允许 `ping`/`version` 哨兵与构建期工具。评审时看到"这个判定放 native 更快"就按此条驳回。
 
 **通用段（G 系列）**——暂不需要新增，G0.0（CI 优先）继续适用。
 
 ---
 
 ## 13. 决策记录
+
+**已定（2026-11-22，判定层修订）**
+
+1. **判定层回 JVM**：`wc_clip_decide` / `wc_clip_pick` / `wc_app_visible` / `wc_app_filter` / `wc_stats_push` 与 `create/destroy/reload` 全部撤回，判定改 Kotlin 纯函数（§3、§7、L16.2.1）。原"一处实现两处用"的理由随 P0 实测失效——两个消费方各只有一个。
+2. **证据通道定案**：只看 `/data/system/watchcat.*` 落盘；`logcat`、`/proc/<pid>/maps`、`/data/adb` 状态目录**禁止**当判据（L15.1）。
+3. **P0 ① 结项**：`ping=0x5743` / `version=0x00020000` / pid 1996，提交 `68ec8d0`。
+4. **应用列表优先级下调**：先让剪贴板从"装了但零行为"变成"装了真的有行为"，再做列表；理由是与《P1-框架接入.md》"下一步 P2"一致，也避免两条主线同时改判定层。
 
 **已定（2026-11-21）**
 
@@ -385,13 +384,16 @@ P0 的四条按顺序做，**任一条证伪就当场改设计**，不硬推。�
 4. 默认值 = **预置数据集**：剪贴板默认"空"，白名单只含当前输入法与系统框架；应用列表默认"预置可见集"（见附录 A.1），默认不隐藏任何应用。
 5. 替身内容 = **自建词库**，先按附录 A.2 起头（每池 8–10 条），后续空闲再扩。
 6. 审计 = **简版**：最近 200 条历史 + 按包名汇总的读取次数，不做"前台偷读比"。
-7. 配置通道 = **remote preferences 为主**（目标应用不可见，待靶子实测确认）；`0640` 文件只作 native 兜底。
+7. 配置通道 = **remote preferences 为主**（目标应用不可见，待靶子实测确认）；文件通道只作兜底，落点见 §6 与 L17。
+8. 判定层 = **Kotlin/JVM 纯函数**，native 只留 `ping`/`version` 哨兵（2026-11-22 修订，见 §3、§7）。
 
 **仍开放的实现细节（P0 后定，不需要现在拍板）**
 
-- 心跳与闸门文件落 `/data/misc` 还是 `/data/system`（取决于 SELinux 实测）。
 - 是否需要单独的"停用工具"（root 侧脚本），还是靠 App 写标记即可。
 - 词库热更新走 remote preferences 变更通知还是"重启模块生效"。
+
+**已关闭的开放项**：心跳与闸门文件落点已定 `/data/system`（`0600 system:system`，实测可写，L17）；
+`/data/misc` 未测，不再候选。
 
 ---
 
@@ -483,7 +485,7 @@ E:\codes\WatchCat\
 │  └─ libs\arm64-v8a\libwatchcat.so                   ← 由 Zygisk 加载
 ├─ zig\                           同一份源码，两个编译目标
 │  ├─ src\watchcat.zig            ← 权限面导出（现有 8 个符号）
-│  └─ src\engine.zig              ← 数据面导出（wc_engine_*）
+│  └─ src\engine.zig              ← 数据面临界符号：wc_engine_ping / wc_engine_version（判定不在这里）
 ├─ tools\build_so.py              编译 + 16KB 门禁（复用，加 engine 目标）
 ├─ docs\hook方案-v0.2.md          本文件
 └─ .github\workflows\build.yml    一条流水线：APK（含模块 dex）+ 模块 zip（含 .so）
