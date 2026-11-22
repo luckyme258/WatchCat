@@ -258,13 +258,21 @@ P2 应用列表的钩点在 **目标应用进程（应用 uid）**：
 
 - ✔ 契约全表：`NameNotFoundException`（info/uid 类）、`IllegalArgumentException`（enabled/installer 类）、`null`（launch/resolve）、`size=0`（query）、`null` 数组元素（`getNamesForUids`）、未知 uid 返回 `null`（`getPackagesForUid`）。
 
+**已实测（2026-11-22 21:25，P2 钩子在小米 13 / Android 17 / Vector 2.2 上首次闭环）**：
+
+- ✔ 作用域：模块 `META-INF/xposed/module.prop` 原写 `staticScope=true`，Vector CLI 拒绝扩作用域（`fixes its scope in module.prop ... It claims: system.`）；改 `staticScope=false` 后 `cli scope add com.luckyme.watchcat com.taobao.taobao/0` 成功，`scope ls` 出现目标。**这是"模块启用但目标从不注入"的静默失败源**，已写入规范 L6。
+- ✔ 注入：0.5.1 冷启动淘宝后 `files/watchcat.p2.marker` = `armed=yes policy=ok hooked=70 declared=361 diag=- mode=hide hide=2 selfPkg=com.taobao.taobao selfUid=10181`，36 个名字族一个不少（`diag=-` 表示无缺失、无失败）。
+- ✔ 契约在真实业务路径上成立：策略 `hide=com.tencent.mm,com.eg.android.AlipayGphone` 下，淘宝启动即产生 3 条 `act=nnf` 事件（`api=getPackageInfo target=com.tencent.mm / com.eg.android.AlipayGphone`），说明应用侧真实现走 `ApplicationPackageManager`、且我们的抛错实现被它正常接收（无崩溃）。
+- ✔ 多进程：同一次冷启动出现 pid 20144 与 21242 两个注入进程，marker 被后写覆盖（规范 L15.2 第 6 条）。
+- ✘ 列表面过滤（`act=filter`）在淘宝启动窗口内 0 次触发：它启动期只做单点 `getPackageInfo`，没调 `getInstalledPackages`/`queryIntentActivities`。列表面要用 `getInstalledApplications` 驱动的靶子（WatchCat 自己的 `AppsScreen`）单独验。
+
 **仍未实测**：
 
-1. `Runtime.exec("pm list packages")` 在普通应用 uid 下是否成功、结果是否受 `<queries>` 限制（**优先级最高**，若成立就是高危旁路）。
-2. `getDeclaredMethods()` + `hookMethod` 在 Vector 2.2 / API 102 下是否需要 hidden API 放行。
+1. `Runtime.exec("pm list packages")` 的旁路半边已确认：`run-as com.luckyme.watchcat` 以 uid 10199 成功执行 `pm list packages`，得 **258** 条，与 shell 的 258 一致（意外结论：**带 `QUERY_ALL_PACKAGES` 的应用可见集与 shell 相同**，L15.3 那句"shell 不能当应用答案"只对无该权限的应用成立）。仍缺"该结果是否绕过应用内钩子"的实测——结构上必然绕过（另一个进程、不经 `ApplicationPackageManager`），待 P2 验收时补一条记录。
+2. `getDeclaredMethods()` + `hookMethod` 在 Vector 2.2 / API 102 下不需 hidden API 放行（实测 70 个钩子全部装上，可视为已答）。
 3. `*Flags` 重载是否内部转调 `int` 重载（只影响性能，不影响正确性——按族枚举已兜住）。
 4. 同 uid 半隐的实际后果（用两个同 uid 靶子包验证"整组判定"是否必要）。
-5. 应用 uid 下的可见集（shell 的 258 个包不能当答案），与 `<queries>` 取交集后的真实隐藏对象。
+5. 无 `QUERY_ALL_PACKAGES` 的应用 uid 可见集，与 `<queries>` 取交集后的真实隐藏对象。
 
 ---
 
@@ -273,6 +281,5 @@ P2 应用列表的钩点在 **目标应用进程（应用 uid）**：
 事实层与契约层都已落地：
 
 1. **证据通道**已定 A 并写成 L15.2（目标私有目录落盘 + App 批量归集）；
-2. **抛错契约**已真机测完（含原以为返回 `null`、实际抛 `IllegalArgumentException` 的 `getInstallerPackageName`）。
-
-剩下只有"应用 uid 的可见集"和"`Runtime.exec(\"pm\")` 旁路"两项待测，但它们影响的是**名单生效范围**与**旁路清单**，不阻塞钩子代码结构。`ApplicationPackageManager` 六族方法可以开工。
+2. **抛错契约**已真机测完（含原以为返回 `null`、实际抛 `IllegalArgumentException` 的 `getInstallerPackageName`）；
+3. **P2 钩子已在真机闭环到"单点面"**：注入成功、契约成立、证据落盘、审计可读，验收只差列表面（`getInstalledPackages`/`queryIntentActivities` 的剔除）与旁路记录。
