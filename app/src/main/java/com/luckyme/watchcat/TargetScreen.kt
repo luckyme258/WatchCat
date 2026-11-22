@@ -30,9 +30,13 @@ class TargetScreen(private val act: MainActivity) {
     private var apps: List<Pair<ApplicationInfo, String>> = emptyList()
     private var showSystem = false
     private var editing: String? = null
+    private var query = ""
 
     private var draft: P2Store.Target? = null
     private var countTv: TextView? = null
+
+    /** 本次会话里"策略已下发、目标进程还没重启"的包；重开页面就丢弃（进程状态不能靠猜缓存）。 */
+    private val pendingRestart = HashSet<String>()
 
     init {
         build()
@@ -132,13 +136,63 @@ class TargetScreen(private val act: MainActivity) {
         filterRow.addView(gap(8))
         filterRow.addView(Ui.button(act, "刷新") { refreshStatus(); loadApps() })
         body.addView(filterRow)
-        body.addView(Ui.spacer(act, 10))
 
+        // 搜索：130+ 应用靠滚动找目标不现实（用户实测的第一道摩擦）
+        val search = android.widget.EditText(act)
+        search.hint = "搜索应用名 / 包名"
+        search.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 12f)
+        search.setTextColor(Ui.TEXT)
+        search.setHintTextColor(Ui.FAINT)
+        search.setSingleLine(true)
+        search.setPadding(Ui.dp(act, 10), Ui.dp(act, 7), Ui.dp(act, 10), Ui.dp(act, 7))
+        search.background = Ui.fill(Ui.CARD_ALT, Ui.dp(act, 9), Ui.STROKE, Ui.dp(act, 1))
+        search.setText(query)
+        search.setSelection(search.text.length)
+        search.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun afterTextChanged(s: android.text.Editable?) {
+                query = s?.toString()?.trim() ?: ""
+                renderRows(cfg)
+            }
+        })
+        body.addView(search, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).also {
+            it.topMargin = Ui.dp(act, 8)
+        })
+
+        renderStale(cfg)
         renderRemedyBoard(cfg)
 
-        val visible = apps.filter { showSystem || (it.first.flags and ApplicationInfo.FLAG_SYSTEM) == 0 }
+        // 应用列表单独装进框里，搜索时只重绘它（别整页重建）
+        val listBox = Ui.col(act)
+        listBox.tag = "rows"
+        body.addView(listBox)
+        renderRows(cfg, listBox)
+
+        body.addView(
+            Ui.tv(
+                act,
+                "「全部可见」= 这个应用又能看到你装的所有东西；「已下发 · 待冷启动」= 策略写进去了，进程还是旧的。",
+                10.5f,
+                Ui.FAINT,
+            ).also { it.setPadding(0, Ui.dp(act, 10), 0, 0) },
+        )
+    }
+
+    /** 只重绘行区域（搜索框输入、切换三态后都走这里，避免滚动位置被整页重建打断）。 */
+    private fun renderRows(cfg: Set<String>, box: LinearLayout? = null) {
+        val target = box ?: (body.findViewWithTag("rows") as? LinearLayout) ?: return
+        target.removeAllViews()
+        val visible = apps.asSequence()
+            .filter { showSystem || (it.first.flags and ApplicationInfo.FLAG_SYSTEM) == 0 }
+            .filter { query.isEmpty() || it.second.contains(query, true) || it.first.packageName.contains(query, true) }
+            .toList()
+        if (visible.isEmpty()) {
+            target.addView(Ui.tv(act, if (query.isEmpty()) "没有可管理的应用" else "没有匹配「$query」的应用", 12f, Ui.MUTED))
+            return
+        }
         val card = Ui.card(act, 1)
-        visible.forEach { (info, label) ->
+        visible.forEachIndexed { i, (info, label) ->
             val pkg = info.packageName
             val row = Ui.row(act)
             row.setPadding(Ui.dp(act, 12), Ui.dp(act, 10), Ui.dp(act, 12), Ui.dp(act, 10))
@@ -146,44 +200,62 @@ class TargetScreen(private val act: MainActivity) {
             val col = Ui.col(act)
             col.addView(Ui.tv(act, label, 13f, Ui.TEXT, bold = true))
             col.addView(Ui.tv(act, pkg, 10.5f, Ui.MUTED))
+            if (pkg in pendingRestart) col.addView(Ui.tv(act, "已下发，等它冷启动", 10f, Ui.FAINT))
             row.addView(col, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-            // 行尾直接给"生效没生效 + 现在是什么姿态"，点一下可以就地切三态。
-            val st = statusFor(pkg, cfg)
-            if (st != null) {
-                row.addView(Ui.chip(act, st.first, st.second, if (st.second) Ui.ACCENT else Ui.WARN) {
-                    quickMode(pkg, label)
-                })
+            statusFor(pkg, cfg)?.let { (text, tone) ->
+                row.addView(Ui.chip(act, text, true, tone) { quickMode(pkg, label) })
             }
             row.setOnClickListener { openEditor(pkg, label) }
             card.addView(row)
-            if (info != visible.last().first) card.addView(Ui.divider(act))
+            if (i != visible.lastIndex) card.addView(Ui.divider(act))
         }
-        if (visible.isEmpty()) card.addView(Ui.tv(act, "没有可管理的应用", 12f, Ui.MUTED))
-        body.addView(card)
+        target.addView(card)
+    }
 
-        body.addView(
-            Ui.tv(
-                act,
-                "提示：切了模式立刻下发，但目标应用要冷启动才装钩子；「已配置但未启用」= 名单存下来了、判定没跑。",
-                10.5f,
-                Ui.FAINT,
-            ).also { it.setPadding(0, Ui.dp(act, 10), 0, 0) },
+    /** 开机后失效的一键续期：列表顶部一条，而不是让用户进 6 个页面各点一次保存。 */
+    private fun renderStale(cfg: Set<String>) {
+        val current = P2Store.bootId()
+        val stale = cfg.filter { p ->
+            val t = runCatching { P2Store.read(act, p) }.getOrNull() ?: return@filter false
+            t.bootId != null && t.bootId != current
+        }
+        if (stale.isEmpty()) return
+        val card = Ui.card(act)
+        card.addView(Ui.tv(act, "${stale.size} 个目标因重启失效（旧授权已过期）", 13f, Ui.WARN, bold = true))
+        card.addView(
+            Ui.tv(act, "续期只改 bootId 这一行，名单和姿态原样保留；续期后目标仍需冷启动。", 10.5f, Ui.MUTED)
+                .also { it.setPadding(0, Ui.dp(act, 2), 0, 0) },
         )
+        val row = Ui.row(act)
+        row.setPadding(0, Ui.dp(act, 8), 0, 0)
+        row.addView(Ui.button(act, "一键续期（${stale.size} 个）", primary = true) {
+            act.bg {
+                val (done, failed) = P2Store.renewBootId(act)
+                act.ui {
+                    act.toast(if (failed == 0) "已续期 $done 个目标（记得让它们冷启动）" else "续期 $done 个，失败 $failed 个")
+                    renderList()
+                }
+            }
+        })
+        card.addView(row)
+        body.addView(card)
+        body.addView(Ui.spacer(act, 10))
     }
 
-    /** 行尾状态：null = 没配过；"-" 类前缀没有特殊含义，只是让两列对齐好读。 */
-    private fun statusFor(pkg: String, cfg: Set<String>): Pair<String, Boolean>? {
+    /** 行尾状态：null = 没配过；颜色 tone 用 ACCENT/WARN/FAINT 区分"生效 / 需注意 / 无害"。 */
+    private fun statusFor(pkg: String, cfg: Set<String>): Pair<String, Int>? {
         if (pkg !in cfg) return null
-        val t = runCatching { P2Store.read(act, pkg) }.getOrNull() ?: return "已配置" to false
-        if (!t.armed) return "未启用 · 不判定" to false
-        if (t.bootId != null && t.bootId != P2Store.bootId()) return "开机后失效" to false
-        return when (t.mode) {
-            PkgPolicy.Mode.SHOW -> "只看基础 · 传${t.show.size}" to true
-            PkgPolicy.Mode.HIDE -> "藏${t.hide.size}" + (if (t.rom) "+ROM" else "") to true
+        val t = runCatching { P2Store.read(act, pkg) }.getOrNull() ?: return "已配置" to Ui.FAINT
+        if (t.bootId != null && t.bootId != P2Store.bootId()) return "开机后失效" to Ui.WARN
+        if (!t.armed) return "全部可见" to Ui.FAINT
+        val base = when (t.mode) {
+            PkgPolicy.Mode.SHOW -> "只看基础 · 传${t.show.size}"
+            PkgPolicy.Mode.HIDE -> "藏${t.hide.size}" + (if (t.rom) "+ROM" else "")
         }
+        return (if (pkg in pendingRestart) "$base · 待冷启动" else base) to Ui.ACCENT
     }
 
-    /** 三态就地切换：只看基础 / 全部可见 / 自定义。选完立即下发，不做"等用户记得点保存"这种坑。 */
+    /** 三态就地切换：只看基础 / 全部可见 / 自定义。自定义不再写空策略，直接进编辑器勾选。 */
     private fun quickMode(pkg: String, label: String) {
         val cur = runCatching { P2Store.read(act, pkg) }.getOrNull()
         val idx = when {
@@ -196,14 +268,14 @@ class TargetScreen(private val act: MainActivity) {
             .setTitle("$label：这个应用能看到什么")
             .setSingleChoiceItems(
                 arrayOf(
-                    "只看基础（最小暴露，默认）",
+                    "只看基础（最小暴露）",
                     "全部可见（关掉伪装）",
                     "自定义（自己选要藏哪些）",
                 ),
                 idx,
             ) { dlg, which ->
                 dlg.dismiss()
-                applyMode(pkg, label, which)
+                if (which == 2) openEditorWithMode(pkg, label, PkgPolicy.Mode.HIDE) else applyMode(pkg, label, which)
             }
             .setNegativeButton("取消") { dlg, _ -> dlg.dismiss() }
             .show()
@@ -219,26 +291,21 @@ class TargetScreen(private val act: MainActivity) {
                     armed = true,
                     mode = PkgPolicy.Mode.SHOW,
                     show = cur?.show?.takeIf { it.isNotEmpty() } ?: base,
+                    rom = cur?.rom ?: false,
                 )
-                1 -> P2Store.Target(
+                else -> P2Store.Target( // 全部可见 = armed=false，钩子照样注入但不判定
                     pkg = pkg,
                     armed = false,
                     mode = PkgPolicy.Mode.SHOW,
                     show = cur?.show?.takeIf { it.isNotEmpty() } ?: base,
-                )
-                else -> P2Store.Target(
-                    pkg = pkg,
-                    armed = true,
-                    mode = PkgPolicy.Mode.HIDE,
-                    hide = cur?.hide ?: emptySet(),
                     rom = cur?.rom ?: false,
                 )
             }
             val msg = P2Store.save(act, t)
             act.ui {
                 act.toast(msg)
-                renderList()
-                if (which == 2) act.toast("自定义：点这一行进编辑器勾选要藏的包")
+                if (msg.startsWith("已保存")) pendingRestart.add(pkg) else pendingRestart.remove(pkg)
+                renderRows(configured())
             }
         }
     }
@@ -292,8 +359,8 @@ class TargetScreen(private val act: MainActivity) {
                     row.getChildAt(1).setOnClickListener { allowAcross(owners.toList(), pkg, name) }
                     card.addView(row)
                 }
-                body.addView(card, 0)
-                body.addView(Ui.spacer(act, 10), 1)
+                body.addView(card)
+                body.addView(Ui.spacer(act, 10))
             }
         }
     }
@@ -331,9 +398,19 @@ class TargetScreen(private val act: MainActivity) {
         // 新目标默认就是「只看基础」：直接带上基础可见集，用户看到的是"能看到 N 个"，而不是空的 0
         draft = existing ?: P2Store.Target(
             pkg = pkg,
+            armed = true,
             mode = PkgPolicy.Mode.SHOW,
             show = BaseSet.collect(act.packageManager, P2Store.currentImeId(act)),
         )
+        renderEditor(pkg, label)
+    }
+
+    /** 从列表的三态弹层直接进编辑器，并且已经落在指定姿态（自定义=隐藏名单，不再先写一份空策略）。 */
+    private fun openEditorWithMode(pkg: String, label: String, mode: PkgPolicy.Mode) {
+        openEditor(pkg, label)
+        val base = draft ?: P2Store.Target(pkg)
+        draft = base.copy(armed = true, mode = mode)
+        if (mode == PkgPolicy.Mode.HIDE) act.toast("勾选要藏的包，再点保存并下发")
         renderEditor(pkg, label)
     }
 
@@ -394,57 +471,59 @@ class TargetScreen(private val act: MainActivity) {
             }
         }
 
-        // 策略
+        // 策略：**只有姿态三选一**，不再有独立的 armed 开关——"配置了但没启用"在结构上就不存在
         val policyCard = Ui.card(act)
         val d = draft ?: P2Store.Target(pkg).also { draft = it }
-        policyCard.addView(Ui.tv(act, "策略", 13.5f, Ui.TEXT, bold = true))
-
-        val armedRow = Ui.row(act)
-        armedRow.setPadding(0, Ui.dp(act, 8), 0, 0)
-        val armedCol = Ui.col(act)
-        armedCol.addView(Ui.tv(act, "启用（armed）", 12.5f, Ui.TEXT))
-        armedCol.addView(Ui.tv(act, "关掉 = 立刻恢复「全可见」，钩子还在但不判定", 10.5f, Ui.MUTED))
-        armedRow.addView(armedCol, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        armedRow.addView(Ui.switchView(act, d.armed) { v -> draft = (draft ?: d).copy(armed = v) })
-        policyCard.addView(armedRow)
+        policyCard.addView(Ui.tv(act, "这个应用能看到什么", 13.5f, Ui.TEXT, bold = true))
 
         val modeRow = Ui.row(act)
         modeRow.setPadding(0, Ui.dp(act, 10), 0, 0)
-        modeRow.addView(Ui.tv(act, "模式", 12.5f, Ui.TEXT))
-        modeRow.addView(gap(10))
-        val hideChip = Ui.chip(act, "隐藏名单", d.mode == PkgPolicy.Mode.HIDE) {
-            draft = (draft ?: d).copy(mode = PkgPolicy.Mode.HIDE)
-            renderEditor(pkg, label)
+        val tri = when {
+            !d.armed -> 1
+            d.mode == PkgPolicy.Mode.SHOW -> 0
+            else -> 2
         }
-        val showChip = Ui.chip(act, "只看基础", d.mode == PkgPolicy.Mode.SHOW) {
-            draft = (draft ?: d).copy(mode = PkgPolicy.Mode.SHOW)
+        modeRow.addView(Ui.chip(act, "只看基础", tri == 0) {
+            draft = d.copy(armed = true, mode = PkgPolicy.Mode.SHOW).let {
+                if (it.show.isEmpty()) it.copy(show = BaseSet.collect(act.packageManager, P2Store.currentImeId(act))) else it
+            }
             renderEditor(pkg, label)
-        }
-        modeRow.addView(hideChip)
+        })
         modeRow.addView(gap(8))
-        modeRow.addView(showChip)
+        modeRow.addView(Ui.chip(act, "全部可见", tri == 1) {
+            draft = d.copy(armed = false, mode = PkgPolicy.Mode.SHOW)
+            renderEditor(pkg, label)
+        })
+        modeRow.addView(gap(8))
+        modeRow.addView(Ui.chip(act, "自定义", tri == 2) {
+            draft = d.copy(armed = true, mode = PkgPolicy.Mode.HIDE, rom = d.rom)
+            renderEditor(pkg, label)
+        })
         policyCard.addView(modeRow)
 
         policyCard.addView(
             Ui.tv(
                 act,
-                if (d.mode == PkgPolicy.Mode.SHOW)
-                    "只看基础：这个应用只能看到下面这份「暴露集合」，其余第三方应用一律看不到。默认集 = 系统关键包 + 桌面 + 输入法。"
-                else
-                    "隐藏名单：这个应用能看到全部，只把下面这些藏掉（默认姿态，风险更高）。",
+                when (tri) {
+                    0 -> "只看基础：它能看到的就下面这份集合，其余第三方一律看不到。默认集 = 系统关键包 + 桌面 + 输入法。"
+                    1 -> "全部可见：钩子照样注入，但不做任何判定 —— 等于关掉伪装，不是「更安全」。"
+                    else -> "自定义：它能看全部，只把下面这些藏掉。名单空着点保存会直接打开勾选页。"
+                },
                 10.5f,
                 Ui.FAINT,
             ).also { it.setPadding(0, Ui.dp(act, 4), 0, 0) },
         )
 
-        val romRow = Ui.row(act)
-        romRow.setPadding(0, Ui.dp(act, 10), 0, 0)
-        val romCol = Ui.col(act)
-        romCol.addView(Ui.tv(act, "ROM 特征包", 12.5f, Ui.TEXT))
-        romCol.addView(Ui.tv(act, "连 org.lineageos.* 一起藏（挡「按包名判断是不是 LineageOS」）", 10.5f, Ui.MUTED))
-        romRow.addView(romCol, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        romRow.addView(Ui.switchView(act, d.rom) { v -> draft = (draft ?: d).copy(rom = v) })
-        policyCard.addView(romRow)
+        if (tri != 1) {
+            val romRow = Ui.row(act)
+            romRow.setPadding(0, Ui.dp(act, 10), 0, 0)
+            val romCol = Ui.col(act)
+            romCol.addView(Ui.tv(act, "ROM 特征包", 12.5f, Ui.TEXT))
+            romCol.addView(Ui.tv(act, "连 org.lineageos.* 一起藏（挡「按包名判断是不是 LineageOS」）", 10.5f, Ui.MUTED))
+            romRow.addView(romCol, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            romRow.addView(Ui.switchView(act, d.rom) { v -> draft = (draft ?: d).copy(rom = v) })
+            policyCard.addView(romRow)
+        }
 
         val listRow = Ui.row(act)
         listRow.setPadding(0, Ui.dp(act, 12), 0, 0)
@@ -453,28 +532,26 @@ class TargetScreen(private val act: MainActivity) {
         listRow.addView(Ui.button(act, "选名单") { pickList(pkg, label, countTv) })
         policyCard.addView(listRow)
 
-        if (d.mode == PkgPolicy.Mode.SHOW) {
-            val baseRow = Ui.row(act)
-            baseRow.setPadding(0, Ui.dp(act, 8), 0, 0)
-            baseRow.addView(
-                Ui.tv(act, "基础可见集：" + BaseSet.describe(act.packageManager, P2Store.currentImeId(act)), 10.5f, Ui.FAINT),
-                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
+        if (tri == 0) {
+            policyCard.addView(
+                Ui.tv(act, "基础可见集：" + BaseSet.describe(act.packageManager, P2Store.currentImeId(act)), 10.5f, Ui.FAINT)
+                    .also { it.setPadding(0, Ui.dp(act, 6), 0, 0) },
             )
-            baseRow.addView(Ui.button(act, "恢复基础集") {
-                val base = BaseSet.collect(act.packageManager, P2Store.currentImeId(act))
-                draft = (draft ?: d).copy(show = base)
-                act.toast("已恢复基础可见集：${base.size} 个（记得保存并下发）")
-                renderEditor(pkg, label)
-            })
-            policyCard.addView(baseRow)
         }
 
         val saveRow = Ui.row(act)
         saveRow.setPadding(0, Ui.dp(act, 12), 0, 0)
         saveRow.addView(Ui.button(act, "保存并下发", primary = true) { save(pkg, label) })
-        saveRow.addView(gap(8))
-        saveRow.addView(Ui.button(act, "删除策略") { remove(pkg, label) })
         policyCard.addView(saveRow)
+
+        // 清空配置是次要动作：一行淡色文字，不抢主按钮
+        policyCard.addView(
+            Ui.tv(act, "删除这条策略", 10.5f, Ui.FAINT).apply {
+                setPadding(0, Ui.dp(act, 12), 0, 0)
+                isClickable = true
+                setOnClickListener { remove(pkg, label) }
+            },
+        )
         body.addView(policyCard)
         body.addView(Ui.spacer(act, 10))
 
@@ -503,16 +580,16 @@ class TargetScreen(private val act: MainActivity) {
 
     private fun listSummary(): String {
         val d = draft ?: return "名单 空"
-        return if (d.mode == PkgPolicy.Mode.SHOW) {
-            "只看基础：能看到 ${d.show.size} 个（其余第三方看不到）"
-        } else {
-            "隐藏 ${d.hide.size} 个" + if (d.rom) " + ROM 特征包" else ""
+        return when {
+            !d.armed -> "全部可见：它能看到你装的所有应用"
+            d.mode == PkgPolicy.Mode.SHOW -> "只看基础：能看到 ${d.show.size} 个（其余第三方看不到）"
+            else -> "自定义：藏 ${d.hide.size} 个" + if (d.rom) " + ROM 特征包" else ""
         }
     }
 
     private fun pickList(pkg: String, label: String, countTv: TextView) {
         val d = draft ?: return
-        val showMode = d.mode == PkgPolicy.Mode.SHOW
+        val showMode = d.mode == PkgPolicy.Mode.SHOW && d.armed
         val items = apps.map { it.second + "\n" + it.first.packageName }
         val pkgs = apps.map { it.first.packageName }
         val selected = BooleanArray(pkgs.size) { pkgs[it] in (if (showMode) d.show else d.hide) }
@@ -521,7 +598,7 @@ class TargetScreen(private val act: MainActivity) {
             .setMultiChoiceItems(items.toTypedArray(), selected) { _, which, checked -> selected[which] = checked }
             .setPositiveButton("确定") { dlg, _ ->
                 val picked = pkgs.filterIndexed { i, _ -> selected[i] }.toSet()
-                draft = if (showMode) d.copy(show = picked) else d.copy(hide = picked)
+                draft = if (showMode) d.copy(show = picked) else d.copy(armed = true, hide = picked)
                 countTv.text = listSummary()
                 dlg.dismiss()
                 renderEditor(pkg, label)
@@ -532,10 +609,17 @@ class TargetScreen(private val act: MainActivity) {
 
     private fun save(pkg: String, label: String) {
         val d = draft ?: return
+        // 自定义姿态却一份名单都没勾：直接进勾选页，别让用户先吃一次"没有可藏的对象"再回来
+        if (d.armed && d.mode == PkgPolicy.Mode.HIDE && d.hide.isEmpty() && !d.rom) {
+            act.toast("先勾选要藏的包")
+            countTv?.let { pickList(pkg, label, it) }
+            return
+        }
         act.bg {
             val msg = P2Store.save(act, d)
             act.ui {
                 act.toast(msg)
+                if (msg.startsWith("已保存")) pendingRestart.add(pkg) else pendingRestart.remove(pkg)
                 // 回读一次：save 可能替我们补了基础可见集，页面必须显示真正下发的那份
                 draft = runCatching { P2Store.read(act, pkg) }.getOrNull() ?: draft
                 refreshStatus()
@@ -545,14 +629,21 @@ class TargetScreen(private val act: MainActivity) {
     }
 
     private fun remove(pkg: String, label: String) {
-        act.bg {
-            val msg = P2Store.remove(act, pkg)
-            act.ui {
-                act.toast(msg)
-                draft = P2Store.Target(pkg)
-                renderEditor(pkg, label)
+        android.app.AlertDialog.Builder(act)
+            .setTitle("删除 $label 的策略？")
+            .setMessage("这个应用会恢复成「全可见」，名单一起丢掉，不能撤销。")
+            .setPositiveButton("删除") { _, _ ->
+                act.bg {
+                    val msg = P2Store.remove(act, pkg)
+                    act.ui {
+                        act.toast(msg)
+                        pendingRestart.remove(pkg)
+                        back()
+                    }
+                }
             }
-        }
+            .setNegativeButton("取消") { dlg, _ -> dlg.dismiss() }
+            .show()
     }
 
     private fun refreshRun(pkg: String, tv: TextView, remedyBox: LinearLayout) {

@@ -79,8 +79,9 @@ object P2Store {
         append("armed=").append(if (t.armed) "yes" else "no").append('\n')
         append("bootId=").append(bootId).append('\n')
         append("mode=").append(if (t.mode == PkgPolicy.Mode.SHOW) "show" else "hide").append('\n')
-        append("hide=").append(t.hide.sorted().joinToString(",")).append('\n')
-        append("show=").append(t.show.sorted().joinToString(",")).append('\n')
+        // 只写当前 mode 用的那份集合：另一份是死数据，留着会和真实意图打架（应用宝那条 `mode=hide` 却残留一长串 `show=`）
+        append("hide=").append(if (t.mode == PkgPolicy.Mode.HIDE) t.hide.sorted().joinToString(",") else "").append('\n')
+        append("show=").append(if (t.mode == PkgPolicy.Mode.SHOW) t.show.sorted().joinToString(",") else "").append('\n')
         append("rom=").append(if (t.rom) "yes" else "no").append('\n')
     }
 
@@ -128,5 +129,29 @@ object P2Store {
         prefs(ctx).edit().remove(keyOf(pkg)).commit()
         val still = runCatching { prefs(ctx).getString(keyOf(pkg), null) }.getOrNull()
         return if (still == null) "已删除：$pkg" else "删除失败：回读仍在"
+    }
+
+    /**
+     * 开机后一键续期：把所有 bootId 跟当前不一致的策略改写成当前 bootId。
+     *
+     * 这是"安全设计在 UX 上的代价"——每轮开机旧授权必须失效（L10.1），但让用户逐个目标重进编辑器点保存
+     * 是纯手工折磨。续期只改 bootId 这一行，**名单与 armed 一律原样保留**，续期不等于重新授权。
+     */
+    fun renewBootId(ctx: Context): Pair<Int, Int> {
+        if (!isRemote()) return 0 to configured(ctx).size
+        val current = bootId()
+        var done = 0
+        var failed = 0
+        for (pkg in configured(ctx)) {
+            val t = read(ctx, pkg) ?: continue
+            if (t.bootId != null && t.bootId == current) continue
+            // 直接重写文本：走 save() 会顺手补基础可见集，违背"只改 bootId 一行"的承诺
+            val body = text(t, current)
+            val p = prefs(ctx).edit().putString(keyOf(pkg), body)
+            if (!p.commit()) { failed++; continue }
+            val back = runCatching { prefs(ctx).getString(keyOf(pkg), null) }.getOrNull()
+            if (back == body) done++ else failed++
+        }
+        return done to failed
     }
 }
