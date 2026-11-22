@@ -273,6 +273,12 @@ P2 应用列表的钩点在 **目标应用进程（应用 uid）**：
 - ✔ 把同一份策略改成 `armed=no` 重开，界面「共 **50** 个应用」，事件不再新增；
 - ✔ 差值 1 正是 `com.sina.weibo`，`pm list packages -3` 的 50 个基线对得上。这是"隐藏生效、且停用即时回到可见"的完整闭环，不是只看日志。
 
+**已实测（2026-11-22 22:02，ROM 特征包层，0.5.2 / versionCode 7）**：策略只有 `armed=yes` + `rom=yes`（用户名单为空，验证"ROM 层单独可启用"这条新语义），WatchCat 自身当靶子：
+
+- ✔ marker `armed=yes policy=ok rom=yes hide=0 hooked=70`；
+- ✔ `getInstalledApplicationsAsUser` 一次性剔除 **32** 个包（`act=filter target=removed=32`），本机 `pm list packages | grep org.lineageos` 正是 30+ 这一量级；
+- ✔ 说明 `rom=yes` 让"名单为空但仍有东西可藏"的策略真的启用了，且 ROM 层确实排在 `uid<10000` 保护之前——否则这 32 个系统应用一个都藏不掉。
+
 **仍未实测**：
 
 1. `Runtime.exec("pm list packages")` 的旁路半边已确认：`run-as com.luckyme.watchcat` 以 uid 10199 成功执行 `pm list packages`，得 **258** 条，与 shell 的 258 一致（意外结论：**带 `QUERY_ALL_PACKAGES` 的应用可见集与 shell 相同**，L15.3 那句"shell 不能当应用答案"只对无该权限的应用成立）。仍缺"该结果是否绕过应用内钩子"的实测——结构上必然绕过（另一个进程、不经 `ApplicationPackageManager`），待 P2 验收时补一条记录。
