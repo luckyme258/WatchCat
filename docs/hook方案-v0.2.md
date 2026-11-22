@@ -412,6 +412,8 @@ P0 的四条里 **① 与 ③ 已结项**：① 的结论是"Zig 只留哨兵"�
 | 策略现读（不重载） | 同一进程内把 `default=empty` 改成 `default=allow`，再起淘宝 | 紧接着的审计变成 `m=HAS/CLIP mode=ALLOW`，**没有重启框架** |
 | 停用即时生效 | `rm` 策略文件后起淘宝 | 审计行数不再增长（钩子在、读不到策略就放行，§8.3） |
 | 替身路径 | 策略加 `mode.10181=fake` / `mode.10179=fake`、`pool=社交`，再起淘宝 | `m=HAS mode=FAKE`、`m=CLIP mode=FAKE` 连出 5 行；对照 EMPTY 时淘宝只问两次 `HAS` 就不再去 `CLIP` —— **返回值确实变了，不是只改了审计文案** |
+| 开机清闸门（模块 v0.4.0 已生效） | `ksud module install` 后整机重启 | `boot.marker`：`fail=0 uptime=3.20`；`service.marker`：`armed=no fail=0 heartbeat=yes uptime=14.30`；`/data/system/watchcat.armed` **不存在**、策略仍在；`p3` marker：`armed=no`、`gateBootId=none`、`policy=ok`、`hooked=0` |
+| 重新启用能回到在线 | 写回 armed（当前 bootId）+ 一次 `stop; start` | `armed=yes`、`policy=ok`、`hooked=5`、`gateBootId` 与当前 bootId 一致；随后 IME `ALLOW`、淘宝 `EMPTY` 照常出审计 |
 | App 按钮链路 | 真机点「停用」→「启用」 | 停用后 `armed`/`policy` 两个文件都不在；启用后按 `ClipGate` 的格式重建：`default=empty`、`imeuid=10189`、`allow=10199`（把自己的 uid 列白，保证 App 自己粘贴不受影响）、`bootId=` 为当前 boot_id、`0600 system:system` |
 | 诊断页 | 打开「数据面 · 剪贴板」卡片 | 读数与 marker 一致：「闸门：已启用（bootId 匹配）」「钩子：armed=yes · policy=ok · hooked=5 · methods=…」「失败计数：0 · 自动停用：未触发」「审计：N 条」 |
 
