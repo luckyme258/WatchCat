@@ -1,9 +1,7 @@
 package com.luckyme.watchcat.xposed;
 
 import android.os.Process;
-import android.util.Log;
 
-import java.io.File;
 import java.io.FileOutputStream;
 import java.nio.charset.StandardCharsets;
 
@@ -15,61 +13,34 @@ import io.github.libxposed.api.XposedModuleInterface.SystemServerStartingParam;
 /**
  * P1 框架接入：只证明「模块被 Vector 加载、生命周期入口可观测」，不注册任何 hook。
  *
- * 约束（L2/L3/L7/L10）：
- *   - 不引用任何 UI/资源类，不拿 Context，不做静态初始化；
- *   - 不在 app 进程做任何动作；
- *   - 唯一副作用是尽力写 /data/adb/watchcat/system_server.marker 供诊断页取证；
- *     写不进去（SELinux）只记 errno，不重试，不影响开机。
+ * 证据通道是 2026-11-22 在小米 13（Android 17 / KernelSU 3.3.1 / NeoZygisk 2.4 / Vector 2.2）
+ * 上一条条试出来的，不要再退回别的判据：
+ *
+ *   1. 日志不是证据。框架的 log() 写进 /data/adb/lspd/log，android.util.Log 在本机
+ *      system_server 里 logcat 也抓不到；两条通道同时沉默，会把「代码没跑」和
+ *      「日志没落盘」混在一起——上一轮就是在这里误判成「回调没被调用」。
+ *   2. /data/adb/watchcat 不是证据。它是 0700 root:root，system_server（uid 1000）
+ *      连 DAC 都过不去，写失败和回调没跑长得一模一样。
+ *   3. 唯一可靠的通道是落盘到 /data/system：同机的 ClipBox（legacy 模块，同样跑在
+ *      system_server 里）能写 /data/system/clipbox_config.json，这是现成的权限证明。
+ *
+ * 约束（L2/L3/L7/L10）：不引用 UI/资源类，不拿 Context，不做有副作用的静态初始化，
+ * 不在 app 进程做任何动作；写不进去只吞掉异常，不重试，不影响开机。
  */
 public final class WatchCatModule extends XposedModule {
     private static final String TAG = "WatchCat";
     private static final String STATE_DIR = "/data/adb/watchcat";
-
-    // 排障用：Vector 的 log() 写它自己的日志文件，抓不到就等于没有。
-    // 这里直连 android.util.Log，只打一行"我到过这里"，用来区分
-    // 「回调没被调用」和「log() 没落盘」这两种完全不同的故障。
-    private static void raw(String s) {
-        try {
-            Log.i("WatchCatP1", s + " pid=" + Process.myPid());
-        } catch (Throwable ignored) {
-        }
-    }
-
-    /**
-     * 不带任何日志的落盘探针：只写文件，不依赖 logcat、也不依赖框架的 log()。
-     * 用来回答「这段代码到底有没有被执行」。写在 /data/system 是因为同机
-     * ClipBox 已在 system_server 里成功写 /data/system/clipbox_config.json。
-     */
-    private static void probe(String stage) {
-        String body = "stage=" + stage
-                + "\npid=" + Process.myPid()
-                + "\ntimeMs=" + System.currentTimeMillis()
-                + "\n";
-        for (String path : new String[]{
-                "/data/system/watchcat." + stage + ".marker",
-                STATE_DIR + "/" + stage + ".marker",
-        }) {
-            try (FileOutputStream out = new FileOutputStream(path, false)) {
-                out.write(body.getBytes(StandardCharsets.UTF_8));
-                return;
-            } catch (Throwable ignored) {
-            }
-        }
-    }
+    private static final String MARKER_DIR = "/data/system";
 
     public WatchCatModule() {
-        probe("ctor");
-        raw("ctor");
+        // 构造函数保持无副作用：L2/L7 不让模块对象在 attach 之前做任何事。
     }
 
     @Override
     public void onModuleLoaded(ModuleLoadedParam param) {
-        probe("moduleLoaded");
-        raw("onModuleLoaded");
         try {
-            final boolean system = param.isSystemServer();
             log(Log.INFO, TAG, "p1: module loaded process=" + param.getProcessName()
-                    + " system=" + system
+                    + " system=" + param.isSystemServer()
                     + " framework=" + getFrameworkName()
                     + " version=" + getFrameworkVersion()
                     + " versionCode=" + getFrameworkVersionCode()
@@ -80,20 +51,28 @@ public final class WatchCatModule extends XposedModule {
         } catch (Throwable t) {
             log(Log.ERROR, TAG, "p1: onModuleLoaded failed", t);
         }
+        writeMarker("p1_module_loaded",
+                "process=" + param.getProcessName()
+                        + "\nsystem=" + param.isSystemServer()
+                        + "\nframework=" + getFrameworkName()
+                        + "\nframeworkVersion=" + getFrameworkVersion()
+                        + "\nframeworkVersionCode=" + getFrameworkVersionCode()
+                        + "\napi=" + getApiVersion());
     }
 
     @Override
     public void onSystemServerStarting(SystemServerStartingParam param) {
-        probe("systemServerStarting");
-        raw("onSystemServerStarting");
         try {
             log(Log.INFO, TAG, "p1: onSystemServerStarting pid=" + Process.myPid()
                     + " classLoader=" + param.getClassLoader()
                     + " api=" + getApiVersion());
-            writeMarker();
         } catch (Throwable t) {
             log(Log.ERROR, TAG, "p1: onSystemServerStarting failed", t);
         }
+        writeMarker("p1_system_server",
+                "classLoader=" + param.getClassLoader()
+                        + "\napi=" + getApiVersion()
+                        + "\nframework=" + getFrameworkName());
     }
 
     private boolean hasCap(long prop) {
@@ -101,39 +80,27 @@ public final class WatchCatModule extends XposedModule {
     }
 
     /**
-     * marker 落盘位置按「DAC + SELinux 实际能不能写」排序，逐个试：
+     * 把一段 ASCII 证据写到 /data/system/watchcat.&lt;stage&gt;.marker。
      *
-     *   1. /data/system/watchcat.marker —— system_server 自己的数据目录。
-     *      同机 ClipBox（legacy 模块，同样跑在 system_server 里）能写
-     *      /data/system/clipbox_config.json，说明这条路径在 uid 1000 下确实可写。
-     *   2. /data/adb/watchcat/system_server.marker —— KernelSU 模块目录。
-     *      它是 0700 root:root，system_server 写不进去（DAC 就拦了），留着只为
-     *      将来若把目录改成 0771 root:system 时能继续用。
-     *
-     * 两个都失败只记 errno，不重试、不影响开机。
+     * 首选 /data/system（system_server 可写）；/data/adb/watchcat 只作回退，那里通常
+     * 打不开，留着一是为了将来把目录权限改成 0771 root:system 时能继续用。
+     * 两个都失败就静默放弃——这是诊断探针，不是功能。
      */
-    private void writeMarker() {
-        final String line = "stage=system_server"
+    private void writeMarker(String stage, String body) {
+        final String content = "stage=" + stage
+                + "\n" + body
                 + "\npid=" + Process.myPid()
-                + "\nframework=" + getFrameworkName()
-                + "\nframeworkVersion=" + getFrameworkVersion()
-                + "\nframeworkVersionCode=" + getFrameworkVersionCode()
-                + "\napi=" + getApiVersion()
                 + "\ntimeMs=" + System.currentTimeMillis()
                 + "\n";
-        final String[] candidates = {
-                "/data/system/watchcat.marker",
-                STATE_DIR + "/system_server.marker",
-        };
-        for (String path : candidates) {
-            final File marker = new File(path);
-            try (FileOutputStream out = new FileOutputStream(marker, false)) {
-                out.write(line.getBytes(StandardCharsets.UTF_8));
-                log(Log.INFO, TAG, "p1: marker written " + path);
+        for (String path : new String[]{
+                MARKER_DIR + "/watchcat." + stage + ".marker",
+                STATE_DIR + "/" + stage + ".marker",
+        }) {
+            try (FileOutputStream out = new FileOutputStream(path, false)) {
+                out.write(content.getBytes(StandardCharsets.UTF_8));
                 return;
-            } catch (Throwable t) {
-                log(Log.WARN, TAG, "p1: marker write failed (probe only, not fatal): "
-                        + path + " " + t);
+            } catch (Throwable ignored) {
+                // 只尝试下一个落点，不记录、不重试。
             }
         }
     }
