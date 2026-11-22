@@ -22,16 +22,27 @@ object P2Device {
      * 框架不支持/服务不在时退回 `vector-cli scope add`（su），并在返回文案里写明走的哪条。
      */
     fun requestScope(pkg: String, done: (String) -> Unit) {
+        val finished = java.util.concurrent.atomic.AtomicBoolean(false)
+        fun finish(msg: String) {
+            if (finished.compareAndSet(false, true)) done(msg)
+        }
         val svc = FrameworkState.service()
         if (svc != null) {
             try {
+                // 框架 accept 了请求但一直不回调的情况在 Vector 2.2 上真实存在（点了没反应），
+                // 所以要自己兜一个超时，超时就落到 CLI，不能让按钮看起来"点了没反应"。
+                val main = android.os.Handler(android.os.Looper.getMainLooper())
+                val fallback = Runnable { if (!finished.get()) cliAdd(pkg) { finish("框架未回执（3s 超时），已改走 CLI：$it") } }
+                main.postDelayed(fallback, 3_000)
                 svc.requestScope(listOf(pkg), object : io.github.libxposed.service.XposedService.OnScopeEventListener {
                     override fun onScopeRequestApproved(approved: List<String>) {
-                        done("已加入作用域（框架批准）：" + approved.joinToString(", "))
+                        main.removeCallbacks(fallback)
+                        finish("已加入作用域（框架批准）：" + approved.joinToString(", "))
                     }
 
                     override fun onScopeRequestFailed(message: String) {
-                        cliAdd(pkg) { cli -> done("框架拒绝：$message；已改走 CLI：$cli") }
+                        main.removeCallbacks(fallback)
+                        cliAdd(pkg) { cli -> finish("框架拒绝：$message；已改走 CLI：$cli") }
                     }
                 })
                 return
@@ -39,7 +50,7 @@ object P2Device {
                 // 服务死掉/能力不支持，落到 CLI
             }
         }
-        cliAdd(pkg, done)
+        cliAdd(pkg, ::finish)
     }
 
     private fun cliAdd(pkg: String, done: (String) -> Unit) {
