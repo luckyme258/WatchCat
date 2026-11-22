@@ -32,8 +32,8 @@ android {
         applicationId = "com.luckyme.watchcat"
         minSdk = 30
         targetSdk = 36
-        versionCode = 6
-        versionName = "0.5.1"
+        versionCode = 7
+        versionName = "0.5.2"
 
         // 只打 packagedAbis（默认 arm64-v8a），见文件顶部说明
         ndk {

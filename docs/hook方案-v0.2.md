@@ -227,6 +227,18 @@ Android 11 起 `<queries>` 让"应用只能看到一部分应用"成为常态，
 
 **不要返回完全空的列表**：很多应用把"一个应用都没装"当成环境异常，直接进异常分支。默认给一份**预置可见集**（见附录 A），看起来就是一个装了十几款常用应用、连银行都没装的普通用户。
 
+### 5.5 ROM 特征包层（2026-11-22 定案，只写方案与边界）
+
+风控判断"是不是 AOSP / LineageOS"最常见的写法就两条：扫 `org.lineageos.*` 这样的包前缀、或者单点 `getPackageInfo("org.lineageos.updater")`。**这两条都落在 P2 已有的注入面上**，不需要另开一层 hook，所以做成了判定层里的一层规则，而不是新模块。
+
+- **规则**：前缀 `org.lineageos.` + 精确名 `lineageos.platform`、`android.overlay.lineage`。用前缀不用固定清单，是因为 LOS 的 overlay 包逐机不同（本机就有 `org.lineageos.settingsoverlay.fuxi`、`org.lineageos.frameworkresoverlay.xiaomi`），清单永远维护不过来；而"按前缀遍历"恰好也是风控的写法。
+- **开关**：显式 `rom=yes`，缺省关（L10.1 的"默认不生效"不破例）。`rom=yes` 时即使用户名单为空也算"有东西可藏"，`enabled()` 允许启用——否则只想做 ROM 伪装时根本开不了。
+- **顺序**：ROM 层排在"`uid<10000` 系统应用永不隐藏"**之前**。这是整套判定里唯一一次给保护规则开口子，理由很直接：LOS 特征包几乎全是系统应用，放在保护之后等于这层永远不生效。
+- **代价与约束**：因此内建名单**只能收 ROM 专属包**。`android`、`com.android.systemui`、Settings、WebView、媒体/电话 provider 这些 AOSP 核心一旦写进去，就是"把应用的依赖藏了 → 应用崩"，禁止。
+- **用户意图优先**：`mode=show` 里显式点名要看到的包，即使命中 ROM 前缀也照常可见。
+- **边界（明确不做）**：① Java 层 `Build.TAGS`/`FINGERPRINT`/`DISPLAY` 不改——改 static final 风险高，改不干净本身就是更强的"改装机"特征；② native 的 `__system_property_get`、直接 open `/system/build.prop`、读 `/proc/*`，应用内注入永远覆盖不到；③ Key Attestation / Play Integrity 的 verified boot 状态是 TEE 签的，进程内不可伪造。**所以对外承诺只能是"经 PackageManager 的包可见性被我们接管"，不能是"骗过 ROM 检测"。**
+- **验证方法**：主力机本身就是 LOS（fuxi），`pm list packages | grep org.lineageos` 有 30+；armed + `rom=yes` 时 `getInstalledApplications` 应出现 `act=filter removed=N`，marker 里有 `rom=yes`。
+
 ---
 
 ## 6. 策略下发与保密（按 Vector 2.2 的真实机制改写）
@@ -389,6 +401,8 @@ P0 的四条里 **① 与 ③ 已结项**：① 的结论是"Zig 只留哨兵"�
 8. **应用列表按方法名族钩、签名运行时枚举**（2026-11-22 dex 核对）：`ApplicationPackageManager` 在 Android 17 上 363 个方法，同一语义普遍有 `int flags` 与 `*Flags` 两套重载；写死签名必漏。族名清单见 `docs/应用列表-API核对.md` §3。
 9. **`queryIntentProviders` / `queryIntentReceivers` 从方案里删掉**：前者在 framework.jar 0 命中，后者只在 `IPackageManager` 系；应用侧对应 `queryIntentContentProviders` / `queryContentProviders` / `resolveContentProvider` 与 `queryBroadcastReceivers`。
 10. **P2 证据通道待定**（`docs/应用列表-API核对.md` §8）：钩子在应用 uid，写不了 `/data/system`；候选是"目标私有目录落盘 + App 用 su 归集"或"显式广播"，定案后要补一条 L15 例外，未定之前不写代码。
+11. **ROM 特征包进 P2 判定层**（§5.5）：显式 `rom=yes` + 前缀 `org.lineageos.` + 两个精确名；排序在系统应用保护之前（唯一一次破例）。边界固定：不碰 `Build` 静态字段、不碰 native 属性读取、不碰 Key Attestation，对外只承诺"经 PackageManager 的包可见性被接管"。顺带记一条实测：**模块可以把自己注入自身进程**（用 `cli scope add <self>` 即可），列表面验证就是靠它当驱动器。
+12. **`scope.list` 的 `staticScope` 教训**：`META-INF/xposed/module.prop` 写 `staticScope=true` 时 Vector 拒绝任何用户扩展作用域（`fixes its scope in module.prop`），且无任何报错，表现为"模块已启用但目标从不注入"。P2 这种"按目标应用生效"的形态必须 `staticScope=false`，规范 L6 已落档。
 
 **已定（2026-11-21）**
 

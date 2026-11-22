@@ -19,6 +19,7 @@ package com.luckyme.watchcat.xposed
  * mode=hide                       # hide=黑名单隐藏 | show=白名单可见
  * hide=com.a,com.b                # mode=hide 时生效
  * show=com.c,com.d                # mode=show 时生效（空集合=不隐藏任何东西，fail-open）
+ * rom=yes                         # 内建 ROM 特征包层（org.lineageos.* 等），缺省=关
  * ```
  *
  * 设计取舍：
@@ -32,6 +33,20 @@ object PkgPolicy {
 
     enum class Mode { HIDE, SHOW }
 
+    /**
+     * ROM 特征包（当前只认 LineageOS，因为主力机就是 LOS；别的 ROM 没实测过，不写进来假装支持）。
+     *
+     * 判定用"前缀 + 两个精确名"，不用固定清单：LOS 的包有 `org.lineageos.updater` 这种用户
+     * 可见应用，也有 `org.lineageos.settingsoverlay.fuxi` 这种每台设备都不一样的 overlay，
+     * 清单维护不过来；而按前缀扫 `org.lineageos.` 是风控最常见的写法，正好一并挡掉。
+     */
+    private val ROM_NAME_PREFIXES = listOf("org.lineageos.")
+    private val ROM_NAME_EXACT = setOf("lineageos.platform", "android.overlay.lineage")
+
+    /** 这个包名是不是 ROM 身份特征。纯字符串判断，不读系统。 */
+    fun isRomFeature(pkg: String): Boolean =
+        ROM_NAME_EXACT.contains(pkg) || ROM_NAME_PREFIXES.any { pkg.startsWith(it) }
+
     data class Snapshot(
         val mode: Mode = Mode.HIDE,
         val hide: Set<String> = emptySet(),
@@ -39,6 +54,8 @@ object PkgPolicy {
         val armed: Boolean = false,
         val bootId: String? = null,
         val version: Int = 1,
+        /** 内建 ROM 特征包层：**必须显式 `rom=yes` 才开**（与 `armed=yes` 同一条纪律：默认不生效）。 */
+        val rom: Boolean = false,
     )
 
     /** 解析策略文本；任何一行坏掉只丢那一行，不让整份策略失效（与 ClipPolicy 同口径）。 */
@@ -50,6 +67,7 @@ object PkgPolicy {
         var armed = false
         var bootId: String? = null
         var version = 1
+        var rom = false
 
         for (raw in text.lineSequence()) {
             val line = raw.trim()
@@ -68,20 +86,23 @@ object PkgPolicy {
                 }
                 "hide" -> value.split(',').forEach { tok -> tok.trim().takeIf { it.isNotEmpty() }?.let { hide.add(it) } }
                 "show" -> value.split(',').forEach { tok -> tok.trim().takeIf { it.isNotEmpty() }?.let { show.add(it) } }
+                "rom" -> rom = value.equals("yes", ignoreCase = true) || value == "1" || value.equals("true", ignoreCase = true)
             }
         }
-        return Snapshot(mode, hide, show, armed, bootId, version)
+        return Snapshot(mode, hide, show, armed, bootId, version, rom)
     }
 
     /**
      * 这份策略在当前这次开机上是否真的启用。
      *
-     * 三条同时满足才算启用：显式 `armed=yes`、`bootId` 等于当前 boot_id、名单非空。
-     * 名单为空时"启用"没有任何意义，还会让每个被注入进程白挂几十个钩子，所以直接判不启用。
+     * 三条同时满足才算启用：显式 `armed=yes`、`bootId` 等于当前 boot_id、且**有东西可藏**
+     * （用户名单非空，或显式 `rom=yes` 让内建 ROM 层参与）。什么都没得藏时"启用"没有任何
+     * 意义，还会让每个被注入进程白挂几十个钩子，所以直接判不启用。
      */
     fun enabled(snapshot: Snapshot, currentBootId: String): Boolean {
         if (!snapshot.armed) return false
         if (snapshot.bootId == null || snapshot.bootId != currentBootId) return false
+        if (snapshot.rom) return true
         return when (snapshot.mode) {
             Mode.HIDE -> snapshot.hide.isNotEmpty()
             Mode.SHOW -> snapshot.show.isNotEmpty()
@@ -94,9 +115,16 @@ object PkgPolicy {
      * 优先级（顺序即语义，改动必须同步改单测）：
      *   1. 空包名 / `android` —— 放行（框架自身）；
      *   2. 调用者自己的包 —— 放行（自杀保护）；
-     *   3. `pkgUid` 已知时：与自身同 uid、或 uid<10000（系统应用）—— 放行；
-     *   4. 按 mode 判：hide=在名单里才隐；show=不在名单里才隐（show 为空则全放行）；
-     *   5. 其余一律放行。
+     *   3. **ROM 特征包层**（`rom=yes` 且命中 [isRomFeature]）—— 隐藏；用户在白名单里显式点名
+     *      的包（`mode=show` 且 `show` 含它）除外，用户意图高于内建规则；
+     *   4. `pkgUid` 已知时：与自身同 uid、或 uid<10000（系统应用）—— 放行；
+     *   5. 按 mode 判：hide=在名单里才隐；show=不在名单里才隐（show 为空则全放行）；
+     *   6. 其余一律放行。
+     *
+     * 第 3 条刻意排在第 4 条前面：ROM 特征包几乎全是 uid<10000 的系统应用（`org.lineageos.updater`
+     * 这类），要是先走"系统应用永不隐藏"，这一层就永远不生效。反过来说，**内建 ROM 名单只能
+     * 收 ROM 专属包，绝不能碰 AOSP 核心**（`android`、`com.android.systemui`、Settings、
+     * WebView、媒体/电话 provider）——那些是应用的依赖，藏了就是崩。
      */
     fun isHidden(
         pkg: String?,
@@ -107,6 +135,8 @@ object PkgPolicy {
     ): Boolean {
         if (pkg == null || pkg.isEmpty() || pkg == "android") return false
         if (pkg == selfPkg) return false
+        val explicitlyShown = snapshot.mode == Mode.SHOW && snapshot.show.contains(pkg)
+        if (!explicitlyShown && snapshot.rom && isRomFeature(pkg)) return true
         if (pkgUid != null && (pkgUid == selfUid || pkgUid < 10000)) return false
         return when (snapshot.mode) {
             Mode.HIDE -> snapshot.hide.contains(pkg)

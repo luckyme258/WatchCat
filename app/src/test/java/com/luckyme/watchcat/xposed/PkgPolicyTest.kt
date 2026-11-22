@@ -90,8 +90,7 @@ class PkgPolicyTest {
     }
 
     @Test
-    fun parseIgnoresBrokenLinesAndComments() {
-        val snap = p.parse(
+    fun parseIgnoresBrokenLinesAndComments() {        val snap = p.parse(
             """
             # 注释
             version=1
@@ -105,5 +104,55 @@ class PkgPolicyTest {
         )
         assertEquals(setOf("com.a", "com.b"), snap.hide)
         assertTrue(p.enabled(snap, boot))
+    }
+
+    // ---- ROM 特征包层（2026-11-22 新增）----
+
+    @Test
+    fun romLayerMustBeExplicitlyOptedIn() {
+        // 只写 armed+bootId，不写 rom=yes：ROM 层不生效，空名单也不启用（默认不生效，L10.1）
+        val snap = p.parse("version=1\narmed=yes\nbootId=$boot\nmode=hide\nhide=\n")
+        assertFalse(snap.rom)
+        assertFalse(p.enabled(snap, boot))
+        assertFalse(p.isHidden("org.lineageos.updater", 1000, selfPkg, selfUid, snap))
+
+        // 显式 rom=yes：即使用户名单为空也算"有东西可藏"
+        val romOnly = p.parse("version=1\narmed=yes\nbootId=$boot\nrom=yes\n")
+        assertTrue(p.enabled(romOnly, boot))
+        assertFalse("换一次开机就该失效", p.enabled(romOnly, "boot-bbb"))
+    }
+
+    @Test
+    fun romLayerHidesLineagePackagesEvenThoughTheyAreSystemUid() {
+        val snap = p.parse("version=1\narmed=yes\nbootId=$boot\nrom=yes\nhide=\n")
+        assertTrue("LOS 系统应用常是 uid<10000，ROM 层必须排在系统应用保护之前",
+            p.isHidden("org.lineageos.updater", 1000, selfPkg, selfUid, snap))
+        assertTrue(p.isHidden("org.lineageos.settingsoverlay.fuxi", 1000, selfPkg, selfUid, snap))
+        assertTrue(p.isHidden("lineageos.platform", 1000, selfPkg, selfUid, snap))
+        assertTrue(p.isHidden("android.overlay.lineage", 1000, selfPkg, selfUid, snap))
+    }
+
+    @Test
+    fun romLayerNeverTouchesAospCoreOrSelf() {
+        val snap = p.parse("version=1\narmed=yes\nbootId=$boot\nrom=yes\nhide=\n")
+        assertFalse(p.isHidden("android", null, selfPkg, selfUid, snap))
+        assertFalse(p.isHidden("com.android.systemui", 1000, selfPkg, selfUid, snap))
+        assertFalse(p.isHidden("com.android.settings", 1000, selfPkg, selfUid, snap))
+        assertFalse(p.isHidden("com.android.webview", 1000, selfPkg, selfUid, snap))
+        assertFalse(p.isHidden("org.lineageos.updater", null, "org.lineageos.updater", selfUid, snap))
+    }
+
+    @Test
+    fun romNoTurnsLayerOff() {
+        val snap = p.parse("version=1\narmed=yes\nbootId=$boot\nrom=no\nhide=com.other.app\n")
+        assertTrue(p.isHidden("com.other.app", null, selfPkg, selfUid, snap))
+        assertFalse(p.isHidden("org.lineageos.updater", 1000, selfPkg, selfUid, snap))
+    }
+
+    @Test
+    fun explicitShowOverridesRomLayer() {
+        // 用户在白名单里点名要看到的包，用户意图高于内建 ROM 规则
+        val snap = p.parse("version=1\narmed=yes\nbootId=$boot\nmode=show\nrom=yes\nshow=org.lineageos.updater\n")
+        assertFalse(p.isHidden("org.lineageos.updater", 1000, selfPkg, selfUid, snap))
     }
 }

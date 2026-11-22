@@ -190,7 +190,8 @@ Android 17 的重载是"旧 int + 新 Flags 对象"并存，且不同 ROM/版本
 | 通道 | 本期是否覆盖 | 事实与理由 |
 |---|---|---|
 | `pm list packages` / `dumpsys package` | **不覆盖** | 跑在 `com.android.shell`（uid 2000）或 system_server，与应用内注入完全无关。隐藏对"外部检查"无效，这是设计事实不是 bug |
-| `Runtime.exec("pm …")`（应用内起 `app_process`） | **不覆盖·待实测** | 同 uid 但**另一个进程**，走 `IPackageManager`  binder，绕过 `ApplicationPackageManager`。需要真机确认普通应用 uid 下 `pm list packages` 是否成功、返回是否受 `<queries>` 限制 |
+| `Runtime.exec("pm …")`（应用内起 `app_process`） | **不覆盖·已实测** | 同 uid 但是**另一个进程**，走 `IPackageManager` binder，绕过 `ApplicationPackageManager`。实测（2026-11-22，`run-as com.luckyme.watchcat`，uid 10199）：`pm list packages` **执行成功**，返回 **258** 条，与 shell 的 258 一致 |
+| ROM 身份类检测（`Build.TAGS`/`FINGERPRINT`、`__system_property_get`、`/system/build.prop`、`/proc/*`、Key Attestation / Play Integrity） | **不覆盖** | 前两类在 Java 静态字段/native/syscall 层，应用内注入只覆盖 `ApplicationPackageManager`；末一类由 TEE 签名、服务端判定，进程内不可伪造。**能覆盖的只有"包存在"这一支**，见 `docs/hook方案-v0.2.md` §5.5 |
 | `LauncherApps.getActivityList` | 不覆盖 | 系统服务侧查询，按包名直查，不受应用内 hook 影响；普通应用可用 |
 | `UsageStatsManager.queryUsageStats` | 不覆盖 | 需 `PACKAGE_USAGE_STATS`（用户授权）后才拿得到，属"行为面" |
 | `ActivityManager.getRunningAppProcesses` | 不覆盖 | 普通应用只能看到自己 |

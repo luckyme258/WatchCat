@@ -198,6 +198,7 @@ object PkgHook {
                     else -> "disarmed"
                 })
                 append("\nmode=").append(snap.mode.name.lowercase())
+                append("\nrom=").append(if (snap.rom) "yes" else "no")
                 append("\nhide=").append(snap.hide.size)
                 append("\nshow=").append(snap.show.size)
                 append("\nselfPkg=").append(ctx.selfPkg)
