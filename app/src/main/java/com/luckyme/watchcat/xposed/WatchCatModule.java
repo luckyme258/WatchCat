@@ -1,6 +1,7 @@
 package com.luckyme.watchcat.xposed;
 
 import android.os.Process;
+import android.util.Log;
 
 import java.io.FileOutputStream;
 import java.nio.charset.StandardCharsets;
