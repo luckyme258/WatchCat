@@ -65,15 +65,16 @@ object P2Device {
         val injected: Boolean get() = marker != null
     }
 
-    /** 读目标进程写下的 marker 与最近事件。文件是目标应用 `0600` 私有，必须 su。 */
+    /** 读目标进程写下的 marker 与最近事件。文件是目标应用 `0600` 私有，必须 su；且必须走全局挂载 ns。 */
     fun injection(pkg: String): Injection {
         val dir = "/data/user/0/$pkg/files"
-        val m = Shell.su("cat $dir/watchcat.p2.marker 2>/dev/null", 6_000)
+        val m = Shell.suMount("cat $dir/watchcat.p2.marker 2>/dev/null")
         val marker = if (m.ok && m.output.isNotBlank()) parseKv(m.output) else null
-        val e = Shell.su("tail -n 5 $dir/watchcat.p2.events.jsonl 2>/dev/null", 6_000)
+        val e = Shell.suMount("tail -n 5 $dir/watchcat.p2.events.jsonl 2>/dev/null")
         val events = if (e.ok && e.output.isNotBlank()) e.output.lineSequence().filter { it.isNotBlank() }.toList() else emptyList()
         val err = when {
-            !m.ok -> "读 marker 失败：${m.output.trim().ifEmpty { "exit=" + m.code }}"
+            !m.ok && m.output.isBlank() -> "读不到目标私有目录（su -M exit=${m.code}）：目标没启动过，或 root 没授权"
+            !m.ok -> "读 marker 失败：${m.output.trim()}"
             marker == null -> "还没有 marker：目标应用在本轮开机后没启动过，或没进作用域"
             else -> null
         }

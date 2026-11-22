@@ -31,10 +31,24 @@ object Shell {
      * 子进程卡在 write 上永不退出 → waitFor 等到超时 → 结果被 destroyForcibly 截断。
      * 2026-11-21 真机表现就是「详情页转 10 秒、权限全显示未读到」，根因在这里。
      */
-    fun su(cmd: String, timeoutMs: Long = 10_000): Result {
+    fun su(cmd: String, timeoutMs: Long = 10_000): Result =
+        exec(listOf("su", "-c", cmd), cmd, timeoutMs)
+
+    /**
+     * 在**全局挂载命名空间**里跑 root 命令。
+     *
+     * 应用进程有自己的 mount namespace：在它眼里 `/data/user/0/<别的应用>` 根本不存在，
+     * 于是 `su -c cat /data/user/0/com.taobao.taobao/files/...` 会「命令跑成功、cat 拿 exit=1」，
+     * 表现成莫名其妙的「读 marker 失败：exit=1」（2026-11-22 小米 13 实测）。
+     * KernelSU/Magisk 的 `su -M`（Magisk 是 `-mm`）切回全局 ns 才看得见。
+     */
+    fun suMount(cmd: String, timeoutMs: Long = 6_000): Result =
+        exec(listOf("su", "-M", "-c", cmd), cmd, timeoutMs)
+
+    private fun exec(argv: List<String>, cmd: String, timeoutMs: Long): Result {
         var p: Process? = null
         return try {
-            p = ProcessBuilder("su", "-c", cmd)
+            p = ProcessBuilder(argv)
                 .redirectErrorStream(true)
                 .start()
             val out = StringBuilder()
