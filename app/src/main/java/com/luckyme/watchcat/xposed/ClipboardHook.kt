@@ -42,9 +42,20 @@ object ClipboardHook {
     private const val F_EVENTS = "$DIR/watchcat.events"
     private const val F_MARKER = "$DIR/watchcat.p3_clip_hook.marker"
 
-    private const val SERVICE_CLASS = "com.android.server.clipboard.ClipboardService"
     private const val MAX_EVENT_BYTES = 96L * 1024L
     private const val KEEP_EVENT_LINES = 200
+
+    /**
+     * 钩哪几个类。**按真实 dex 结论**：五个读方法都声明在内层 `ClipboardImpl`
+     * （`ClipboardService$ClipboardImpl`，IClipboard.Stub 的实现体），`ClipboardService`
+     * 本身一个都没有。2026-11-22 首次真机跑出来 hooked=0，就是只在 `ClipboardService` 上找，
+     * 名字全 miss——dex 里的每段都标着 `(in Lcom/android/server/clipboard/ClipboardService$ClipboardImpl;)`。
+     * 顺序即优先级：命中几个就钩几个，命中多的优先；外层类只做兜底（某些版本会把实现放回外层）。
+     */
+    private val SERVICE_CLASSES: List<String> = listOf(
+        "com.android.server.clipboard.ClipboardService\$ClipboardImpl",
+        "com.android.server.clipboard.ClipboardService",
+    )
 
     private enum class Kind { CLIP, DESC, SOURCE, HAS, HAS_TEXT }
 
@@ -73,27 +84,43 @@ object ClipboardHook {
         val armed = gateBootId != null && gateBootId == bootId && policyState == "ok"
 
         val hooked = ArrayList<String>()
+        // 诊断：钩不上时把"为什么"一起落盘。上一版只记 hooked=0，等于把
+        // "类没加载 / 方法没找到 / 被框架拒绝"三件事混成一件事（本机实测就是这个坑）。
+        val diag = ArrayList<String>()
+        var declaredCount = 0
+        var declaredErr = "-"
         var classState = "skip"
         if (armed) {
-            val cls = try {
-                loader.loadClass(SERVICE_CLASS)
-            } catch (t: Throwable) {
-                classState = "not-found:" + t.javaClass.simpleName
-                null
-            }
-            if (cls != null) {
+            for (className in SERVICE_CLASSES) {
+                val cls = try {
+                    loader.loadClass(className)
+                } catch (t: Throwable) {
+                    diag.add("noclass=" + className + ":" + brief(t))
+                    continue
+                }
                 classState = cls.name
                 val declared = try {
-                    cls.declaredMethods
+                    cls.declaredMethods.also { declaredCount += it.size }
                 } catch (t: Throwable) {
+                    declaredErr = brief(t)
                     emptyArray<Method>()
                 }
                 for ((name, kind) in READ_METHODS) {
+                    var matched = 0
                     for (m in declared) {
                         if (m.name != name) continue
-                        if (hookOne(api, m, kind)) hooked.add(name)
+                        matched++
+                        val err = hookOne(api, m, kind)
+                        if (err == null) {
+                            hooked.add(name)
+                        } else {
+                            diag.add("fail=" + name + "(" + arity(m) + "p):" + err)
+                        }
                     }
+                    if (matched == 0) diag.add("miss=" + className + "#" + name)
                 }
+                // 这一层类已经把读方法钩住了就不再试兜底类，避免同一方法钩两遍
+                if (hooked.isNotEmpty()) break
             }
         }
 
@@ -104,6 +131,9 @@ object ClipboardHook {
                 "\nhooked=" + hooked.size +
                 "\nmethods=" + (if (hooked.isEmpty()) "-" else hooked.joinToString(",")) +
                 "\nclass=" + classState +
+                "\ndeclared=" + declaredCount +
+                "\ndeclaredErr=" + declaredErr +
+                "\ndiag=" + (if (diag.isEmpty()) "-" else diag.joinToString(";").take(600)) +
                 "\nblock=unsupported" +
                 "\nbootId=" + bootId +
                 "\ngateBootId=" + (gateBootId ?: "none")
@@ -111,14 +141,28 @@ object ClipboardHook {
         return "armed=" + armed + " policy=" + policyState + " hooked=" + hooked.size
     }
 
-    private fun hookOne(api: XposedInterface, method: Method, kind: Kind): Boolean = try {
+    /** 钩一个方法；成功返回 null，失败返回一行原因（异常类型 + 消息前段）。 */
+    private fun hookOne(api: XposedInterface, method: Method, kind: Kind): String? = try {
         api.hook(method)
             .setPriority(XposedInterface.PRIORITY_DEFAULT)
             .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
             .intercept { chain -> interceptOne(chain, kind) }
-        true
+        null
     } catch (t: Throwable) {
-        false
+        brief(t)
+    }
+
+    /** 异常压成一行 ASCII，落盘用；`File.writeText` 里出现换行会把 marker 的 key=value 打乱。 */
+    private fun brief(t: Throwable): String =
+        (t.javaClass.simpleName + ":" + (t.message ?: ""))
+            .replace('\n', ' ')
+            .replace('\r', ' ')
+            .take(120)
+
+    private fun arity(m: Method): String = try {
+        m.parameterCount.toString()
+    } catch (t: Throwable) {
+        "?"
     }
 
     /**
