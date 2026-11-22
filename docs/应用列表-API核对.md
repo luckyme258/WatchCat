@@ -264,7 +264,13 @@ P2 应用列表的钩点在 **目标应用进程（应用 uid）**：
 - ✔ 注入：0.5.1 冷启动淘宝后 `files/watchcat.p2.marker` = `armed=yes policy=ok hooked=70 declared=361 diag=- mode=hide hide=2 selfPkg=com.taobao.taobao selfUid=10181`，36 个名字族一个不少（`diag=-` 表示无缺失、无失败）。
 - ✔ 契约在真实业务路径上成立：策略 `hide=com.tencent.mm,com.eg.android.AlipayGphone` 下，淘宝启动即产生 3 条 `act=nnf` 事件（`api=getPackageInfo target=com.tencent.mm / com.eg.android.AlipayGphone`），说明应用侧真实现走 `ApplicationPackageManager`、且我们的抛错实现被它正常接收（无崩溃）。
 - ✔ 多进程：同一次冷启动出现 pid 20144 与 21242 两个注入进程，marker 被后写覆盖（规范 L15.2 第 6 条）。
-- ✘ 列表面过滤（`act=filter`）在淘宝启动窗口内 0 次触发：它启动期只做单点 `getPackageInfo`，没调 `getInstalledPackages`/`queryIntentActivities`。列表面要用 `getInstalledApplications` 驱动的靶子（WatchCat 自己的 `AppsScreen`）单独验。
+- ✘ 列表面过滤在淘宝启动窗口内 0 次触发：它启动期只做单点 `getPackageInfo`，没调 `getInstalledPackages`/`queryIntentActivities`。改用 `getInstalledApplications` 驱动的靶子单独验（见下条）。
+
+**已实测（2026-11-22 21:35–21:36，列表面 A/B）**：把 WatchCat 自己加进作用域（模块可以注入自身进程，实测可行），用 App 的「应用」页 `pm.getInstalledApplications(0)` 当驱动器，策略 `hide=com.sina.weibo`：
+
+- ✔ armed 时界面「共 **49** 个应用」，`events.jsonl` 记 `api=getInstalledApplicationsAsUser target=removed=1 act=filter`（淘宝同窗口是 0 条，说明驱动器选对了）；
+- ✔ 把同一份策略改成 `armed=no` 重开，界面「共 **50** 个应用」，事件不再新增；
+- ✔ 差值 1 正是 `com.sina.weibo`，`pm list packages -3` 的 50 个基线对得上。这是"隐藏生效、且停用即时回到可见"的完整闭环，不是只看日志。
 
 **仍未实测**：
 
@@ -282,4 +288,5 @@ P2 应用列表的钩点在 **目标应用进程（应用 uid）**：
 
 1. **证据通道**已定 A 并写成 L15.2（目标私有目录落盘 + App 批量归集）；
 2. **抛错契约**已真机测完（含原以为返回 `null`、实际抛 `IllegalArgumentException` 的 `getInstallerPackageName`）；
-3. **P2 钩子已在真机闭环到"单点面"**：注入成功、契约成立、证据落盘、审计可读，验收只差列表面（`getInstalledPackages`/`queryIntentActivities` 的剔除）与旁路记录。
+3. **P2 钩子已在真机闭环到四个面**：单点面（`getPackageInfo` → `nnf`）、列表面（`getInstalledApplications` → `removed=1`，界面 49 vs 50）；证据落盘、审计可读、停用即时回到可见，验收表这一栏可以勾了。
+4. 验证用的作用域（淘宝、WatchCat 自身）与两份 `watchcat.p2.policy` 已清理，设备回到"作用域只有 system + 策略不存在 = 全可见"的出厂态。
