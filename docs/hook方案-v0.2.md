@@ -239,6 +239,20 @@ Android 11 起 `<queries>` 让"应用只能看到一部分应用"成为常态，
 - **边界（明确不做）**：① Java 层 `Build.TAGS`/`FINGERPRINT`/`DISPLAY` 不改——改 static final 风险高，改不干净本身就是更强的"改装机"特征；② native 的 `__system_property_get`、直接 open `/system/build.prop`、读 `/proc/*`，应用内注入永远覆盖不到；③ Key Attestation / Play Integrity 的 verified boot 状态是 TEE 签的，进程内不可伪造。**所以对外承诺只能是"经 PackageManager 的包可见性被我们接管"，不能是"骗过 ROM 检测"。**
 - **验证方法**：主力机本身就是 LOS（fuxi），`pm list packages | grep org.lineageos` 有 30+；armed + `rom=yes` 时 `getInstalledApplications` 应出现 `act=filter removed=N`，marker 里有 `rom=yes`。
 
+### 5.6 默认姿态「只看基础」与基础可见集（2026-11-22 定案，0.5.5）
+
+**决策**：P2 的默认姿态从"隐藏名单（默认全可见）"改成"只看基础"（`mode=show` + 一份**基础可见集**）。
+
+- **为什么不能是空集**：`isHidden` 第 5 条在 `show` 为空时 fail-open（全可见）。真按"空集隐藏"跑，桌面点不开、输入法不出、登录页跳不回来，应用直接崩。所以 App 侧 `P2Store.save` 在白名单为空时**自动补基础集并回读**，返回文案写明补了多少；钩子侧保持"空 show = 不启用 + 全放行"不动。
+- **基础集由本机探测**（`BaseSet.kt`），不写死机型：
+  - 系统关键包（`BaseSet.SYSTEM_CRITICAL`）：`android`、SystemUI、Settings、权限控制器、WebView（AOSP + Google）、GMS/GSF、Play 商店、DocumentsUI、IntentResolver（分享面板）、两个安装器、媒体/下载/外置存储/defcontainer。
+  - 桌面：`queryIntentActivities(ACTION_MAIN + CATEGORY_HOME)` 全量（第三方桌面也算）。
+  - 输入法：`queryIntentServices("android.view.inputmethod.InputMethod")` 全量 + 当前默认输入法。**第三方输入法必须进基础集**，只看 `uid<10000` 会漏（Gboard 在这台机器是 10189）。
+- **生效范围**：基础集只决定第三方可见性。`uid<10000` 的系统应用在判定里本来永不隐藏（自杀保护），列它只为语义完整、便于在 UI/文档里展示。**但"只拿包名"的单点查询读不到 uid**，所以钩子必须先 `proceed()` 拿真实对象、从对象里取 uid 再定案（0.5.6，决策 17）——否则 `show` 模式会把 `com.android.providers.settings` 这类系统 provider 一起藏掉。
+- **UI 口径**：列表行不再问"藏谁"，而是"**能看到几个**"；编辑器 chip 从「隐藏名单 / 白名单可见」改成「隐藏名单 / 只看基础」，并给一个「恢复基础集」按钮。
+- **补救回路（必须配，否则用户只会关功能）**：钩子每个被挡的调用都写了 `target=<被查包> act=nnf|iae`，App 侧 `P2Device.remedies()` 把最近 200 条事件聚合成"它想看谁 × 几次"，在编辑器运行状态卡里列成可点 chip：点一下就把该包放进暴露集合（`mode=show` 加进 `show`，`mode=hide` 从 `hide` 删掉），提示"记得保存并下发"。这样"最小暴露"坏了以后有可诊断、可修复的出口，而不是让用户自己猜哪个包该放行。
+- **已知缺口**：补救回路目前只在**单个目标编辑器**里出现；列表页的跨目标汇总（"微信被 3 个应用问过"）还没做，需要先把各目标事件批量归集到一处（见 §13.2 未闭环第 2 条）。
+
 ---
 
 ## 6. 策略下发与保密（按 Vector 2.2 的真实机制改写）
@@ -405,6 +419,9 @@ P0 的四条里 **① 与 ③ 已结项**：① 的结论是"Zig 只留哨兵"�
 12. **`scope.list` 的 `staticScope` 教训**：`META-INF/xposed/module.prop` 写 `staticScope=true` 时 Vector 拒绝任何用户扩展作用域（`fixes its scope in module.prop`），且无任何报错，表现为"模块已启用但目标从不注入"。P2 这种"按目标应用生效"的形态必须 `staticScope=false`，规范 L6 已落档。
 13. **P2 策略按目标分键**（0.5.3）：remote prefs group `p2`、键 `policy.<目标包名>`。不能共用一个 `policy` 键——一个模块一份 group，共用等于"给 A 配的名单也套到 B 上"。保存必须写当前 `bootId` 并**回读校验**（`apply` 异步，不信返回值）；钩子侧读取顺序 `policy.<pkg>` → 旧单键 `policy` → 目标私有目录文件。
 14. **读别的应用私有目录必须 `su -M`**（0.5.4）：应用进程有自己的 mount namespace，里面看不到 `/data/user/0/<别的应用>`，于是 `su -c cat …` 变成"命令跑成功、`cat` 静默 `exit=1`"，页面显示成"读 marker 失败：exit=1"。读 marker/事件一律走全局挂载 ns，失败文案要区分"读不到目录"与"还没有 marker"。规范 L15 的例外条款随之下沉到 `Shell.suMount`。
+15. **默认姿态改「只看基础」+ 基础集本机探测 + App 侧补集**（0.5.5）：`P2Store.Target` 默认 `mode=SHOW`；基础集由 `BaseSet.collect(pm, defaultImeId)` 现场探测（系统关键包 + 桌面 `ACTION_MAIN/CATEGORY_HOME` + 输入法 `queryIntentServices` + 当前默认输入法），不写死机型清单；空名单保存时自动补集并回读校验。钩子侧"空 `show` = 不启用 + 全放行"保持不变，两条规则各管一半。
+16. **补救回路用事件聚合 + 一键放行**（0.5.5）：钩子把每个被挡的调用写成 `target=<被查包> act=nnf|iae`，App 侧 `P2Device.remedies(events)`（正则 `target=([^ ]+) act=([a-z]+)`，只认 `nnf/iae`，`count` 降序）聚合出"它想看谁 × 几次"，在目标编辑器里展示为可点 chip；点一下把该包放进暴露集合（`show` 加、`hide` 删），chip 变「✓ 已放行（未保存）」并提示"记得保存并下发"。事件读取从 `tail -n 5` 提到 `tail -n 200`，否则聚合样本太少。
+17. **参数级预判不能只凭包名定案**（0.5.6，真机发现）：0.5.5 在 ClipBait 上验「只看基础」，`show=20 / hide=0 / module=0.5.5` 都符合预期，第三方（淘宝/微博/酷安/拼多多）全被 `nnf` 挡掉——但 `target=com.android.providers.settings`、`target=com.android.inputdevices` 也被挡了。原因是单点查询那一路 `argPackage()` 只拿得到包名字符串，`pkgUid=null`，于是 `uid<10000 → 放行` 这条保护规则轮不到。修法不是往基础集里塞更多系统包，而是**先 `proceed()` 拿真实返回对象、从对象里取 uid 再定案**（`pkgUidOf` 补 `ProviderInfo` 与 `ResolveInfo` 的 `applicationInfo.uid`）；`resolve*` 同样改成用返回对象里的 uid。判定层函数不变，单测不动。
 
 **已定（2026-11-21）**
 

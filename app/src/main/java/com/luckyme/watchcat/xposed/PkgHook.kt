@@ -235,6 +235,11 @@ object PkgHook {
 
         val argPkg = argPackage(chain)
         if (argPkg != null && safelyHidden(argPkg, null, ctx, snap)) {
+            // 参数级预判只拿到包名、拿不到 uid，而 uid<10000 的保护规则需要 uid。
+            // 所以预判只当"候选"，先拿真实返回对象里的 uid 再定案（L10.4：宁可漏，不可错杀系统 provider）。
+            val raw = chain.proceed()
+            val uid = pkgUidOf(raw)
+            if (!safelyHidden(argPkg, uid, ctx, snap)) return filter(chain, name, raw, ctx, snap)
             when {
                 name in NULL_NAMES -> {
                     audit(ctx, name, argPkg, "null")
@@ -251,6 +256,7 @@ object PkgHook {
                     )
                 }
             }
+            return filter(chain, name, raw, ctx, snap)
         }
 
         val raw = chain.proceed()
@@ -280,7 +286,7 @@ object PkgHook {
             name in LIST_NAMES || name in QUERY_NAMES -> filterList(raw, name, ctx, snap)
             name in RESOLVE_NAMES -> {
                 val p = pkgOf(raw)
-                if (p != null && safelyHidden(p, null, ctx, snap)) {
+                if (p != null && safelyHidden(p, pkgUidOf(raw), ctx, snap)) {
                     audit(ctx, name, p, "null")
                     null
                 } else {
@@ -410,6 +416,10 @@ object PkgHook {
     private fun pkgUidOf(o: Any?): Int? = when (o) {
         is ApplicationInfo -> o.uid
         is PackageInfo -> o.applicationInfo?.uid
+        is ProviderInfo -> o.applicationInfo?.uid
+        is ResolveInfo -> o.activityInfo?.applicationInfo?.uid
+            ?: o.serviceInfo?.applicationInfo?.uid
+            ?: o.providerInfo?.applicationInfo?.uid
         else -> null
     }
 
