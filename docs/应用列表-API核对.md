@@ -107,24 +107,49 @@
 
 **这一列不是风格问题，写错就是崩溃或自相矛盾。**
 
-| 方法族 | 隐藏时 |
+| 方法族 | 隐藏时（**2026-11-22 真机实测已定，见 §4.1**） |
 |---|---|
 | `getInstalledPackages` / `getInstalledApplications`（含 AsUser） | 从结果列表剔除；返回空列表**不返回 null** |
-| `getPackageInfo` / `getPackageInfoAsUser` | 抛 `PackageManager.NameNotFoundException` |
-| `getApplicationInfo` / `getApplicationInfoAsUser` | 抛 `PackageManager.NameNotFoundException` |
-| `getPackageUid` / `getPackageUidAsUser` | 抛 `PackageManager.NameNotFoundException` |
-| `getApplicationEnabledSetting` | **待实测**：可能是 `IllegalArgumentException`，也可能返回 `COMPONENT_ENABLED_STATE_DEFAULT`；不能凭印象写 |
-| `getComponentEnabledSetting` | 同上（组件所属包被隐藏时的行为） |
-| `getInstallerPackageName` | `null`（该方法对未知包本来就返回 null） |
-| `getLaunchIntentForPackage` / `getLeanbackLaunchIntentForPackage` / `getLaunchIntentSenderForPackage` | `null` |
-| `queryIntentActivities` / `Services` / `ContentProviders` / `BroadcastReceivers` / `IntentActivityOptions` / `queryContentProviders` | 剔除；返回空列表，不返回 null |
-| `resolveActivity` / `resolveService` / `resolveContentProvider`（含 AsUser） | `null` |
-| `getPackagesForUid` | 剔除（同 uid 全隐才隐，见 §5.4） |
-| `getNamesForUids` | 对应下标置 `null` |
+| `getPackageInfo` / `getPackageInfoAsUser` | 抛 `PackageManager.NameNotFoundException`（实测） |
+| `getApplicationInfo` / `getApplicationInfoAsUser` | 抛 `PackageManager.NameNotFoundException`（实测） |
+| `getPackageUid` / `getPackageUidAsUser` | 抛 `PackageManager.NameNotFoundException`（实测） |
+| `getApplicationEnabledSetting` | 抛 `IllegalArgumentException: Unknown package: <pkg>`（实测，**不是返回 DEFAULT**） |
+| `getComponentEnabledSetting` | 抛 `IllegalArgumentException: Unknown component: ComponentInfo{…}`（实测） |
+| `getInstallerPackageName` | **抛 `IllegalArgumentException: Unknown package: <pkg>`**（实测；原以为返回 null，写错就是崩溃） |
+| `getLaunchIntentForPackage` / `getLeanbackLaunchIntentForPackage` / `getLaunchIntentSenderForPackage` | `null`（实测前两者） |
+| `queryIntentActivities` / `Services` / `ContentProviders` / `BroadcastReceivers` / `IntentActivityOptions` / `queryContentProviders` | 剔除；返回空列表，不返回 null（实测 `size=0`） |
+| `resolveActivity` / `resolveService` / `resolveContentProvider`（含 AsUser） | `null`（实测 `resolveActivity`） |
+| `getPackagesForUid` | 目标 uid 不存在时 `null`（实测）；uid 存在但包被隐藏时剔除该名字，同 uid 全隐才隐（§5.4） |
+| `getNamesForUids` | 对应下标置 `null`，不缩数组（实测 `[99999,10173] → [null,"io.github.pgntgz.clipbait"]`） |
 | `getSharedLibraries` / `AsUser` | 剔除（`SharedLibraryInfo#getDeclaringPackage` 的包名） |
 | `getPreferredActivities` | 两个输出列表（`IntentFilter` / `ComponentName`）都要剔，并把返回计数相应减掉 |
 
 过滤取"包名"的字段：`PackageInfo.packageName`、`ApplicationInfo.packageName`、`ResolveInfo.activityInfo/serviceInfo/providerInfo.packageName`（按面取，不要一律读 `resolveInfo.activityInfo`——receiver/provider 的 `activityInfo` 是 null）、`ProviderInfo.packageName`、`SharedLibraryInfo.getDeclaringPackage().getName()`。
+
+### 4.1 实测原始输出（2026-11-22，小米 13 / SDK 37，`app_process` 以 uid 2000 运行）
+
+探针零侵入：`javac` 编译 → `d8` 出 `classes.dex` → `adb push /data/local/tmp/probe.dex` → `CLASSPATH=/data/local/tmp/probe.dex app_process /system/bin Main`。**不装 APK、不改任何靶子、不重启框架。**
+
+```
+ctx ok, pm=android.app.ApplicationPackageManager
+uid=2000 sdk=37
+getInstalledPackages(0) -> size=258
+getPackageInfo(absent,0) -> THREW android.content.pm.PackageManager$NameNotFoundException : com.watchcat.absent.probe.zzz
+getApplicationInfo(absent,0) -> THREW android.content.pm.PackageManager$NameNotFoundException : com.watchcat.absent.probe.zzz
+getPackageUid(absent,0) -> THREW android.content.pm.PackageManager$NameNotFoundException : com.watchcat.absent.probe.zzz
+getApplicationEnabledSetting(absent) -> THREW java.lang.IllegalArgumentException : Unknown package: com.watchcat.absent.probe.zzz
+getComponentEnabledSetting(absent) -> THREW java.lang.IllegalArgumentException : Unknown component: ComponentInfo{com.watchcat.absent.probe.zzz/com.watchcat.absent.probe.zzz.MainActivity}
+getInstallerPackageName(absent) -> THREW java.lang.IllegalArgumentException : Unknown package: com.watchcat.absent.probe.zzz
+getLaunchIntentForPackage(absent) -> NULL
+getLeanbackLaunchIntentForPackage(absent) -> NULL
+queryIntentActivities(pkg=absent) -> size=0
+resolveActivity(pkg=absent) -> NULL
+getPackagesForUid(99999) -> NULL
+getNamesForUids -> null|io.github.pgntgz.clipbait|
+getInstallerPackageName(taobao) -> mark.via
+```
+
+口径说明：本探针跑在 **uid 2000（shell）**，`getInstalledPackages` 因此看到 258 个包。上面的"存在性/抛错形态"与 uid 无关，可直接采用；**凡涉及"看得见哪些包"的结论，必须再用应用 uid 复验**（`<queries>` 交集那类问题不能拿 shell 的可见集当答案）。
 
 ---
 
@@ -204,13 +229,13 @@ P2 应用列表的钩点在 **目标应用进程（应用 uid）**：
 - `/data/local/tmp` 是 `shell:shell 0771`，应用 uid 也写不进；
 - 目标应用自己的 `/data/data/<target>/files/` **可写**，但那是"被管对象的私有目录"。
 
-三个候选（需要拍板，未定之前不写代码）：
+**已定：方案 A（2026-11-22 用户批准），条款落 `LSP模块2026开发规范.md` L15.2。**
 
 | 方案 | 做法 | 代价 |
 |---|---|---|
-| A（推荐） | 注入侧只写 `<target>/files/watchcat.p2.jsonl`（0600 target uid，一行一条聚合），WatchCat App 用 su 归集到 `/data/system/watchcat.p2.events`（0600 system:system）并记录来源 uid/包名 | 需要给 L15.1 加一条"目标进程内证据只能落自身私有目录、由 App 归集"的例外；归集是批量读，不能每条一次 su |
-| B | 注入侧发显式广播给 WatchCat，由 App 落盘 | 广播可被同 uid 伪造，证据强度低于文件；还会让被管应用看到一条异常广播 |
-| C | 不落盘，只在目标进程内存计数，靠诊断页主动探针取 | 需要被管应用里有自检入口（等于要求用户装靶子），不能作为常规验收通道 |
+| **A（已采用）** | 注入侧只写 `<target>/files/watchcat.p2.jsonl`（0600 target uid，一行一条聚合），WatchCat App 用 su **批量**归集到 `/data/system/watchcat.p2.events`（0600 system:system），并校验目录 uid ↔ 包名一致 | 已在 L15.2 立条款：禁止逐条 su；判据仍是归集后的 `/data/system` 文件 |
+| B（弃） | 注入侧发显式广播给 WatchCat，由 App 落盘 | 广播可被同 uid 伪造，证据强度低于文件；还会让被管应用看到一条异常广播 |
+| C（弃） | 不落盘，只在目标进程内存计数，靠诊断页主动探针取 | 需要被管应用里有自检入口（等于要求用户装靶子），不能作为常规验收通道 |
 
 ---
 
@@ -229,19 +254,25 @@ P2 应用列表的钩点在 **目标应用进程（应用 uid）**：
 
 ## 10. 待实测（不实测不进验收表）
 
-1. `getApplicationEnabledSetting` / `getComponentEnabledSetting` 对未知包的抛错形态（`IllegalArgumentException` vs 返回 DEFAULT）。
-2. `Runtime.exec("pm list packages")` 在普通应用 uid 下是否成功、结果是否受 `<queries>` 限制。
-3. `getDeclaredMethods()` + `hookMethod` 在 Vector 2.2 / API 102 下是否需要 hidden API 放行。
-4. `*Flags` 重载是否内部转调 `int` 重载（若是，钩 `int` 一份就够；但既然按族枚举，结论只影响性能不影响正确性）。
-5. 同 uid 半隐的实际后果（用两个同 uid 靶子包验证"整组判定"是否必要）。
+**已实测（2026-11-22，`app_process` 探针，原始输出见 §4.1）**：
+
+- ✔ 契约全表：`NameNotFoundException`（info/uid 类）、`IllegalArgumentException`（enabled/installer 类）、`null`（launch/resolve）、`size=0`（query）、`null` 数组元素（`getNamesForUids`）、未知 uid 返回 `null`（`getPackagesForUid`）。
+
+**仍未实测**：
+
+1. `Runtime.exec("pm list packages")` 在普通应用 uid 下是否成功、结果是否受 `<queries>` 限制（**优先级最高**，若成立就是高危旁路）。
+2. `getDeclaredMethods()` + `hookMethod` 在 Vector 2.2 / API 102 下是否需要 hidden API 放行。
+3. `*Flags` 重载是否内部转调 `int` 重载（只影响性能，不影响正确性——按族枚举已兜住）。
+4. 同 uid 半隐的实际后果（用两个同 uid 靶子包验证"整组判定"是否必要）。
+5. 应用 uid 下的可见集（shell 的 258 个包不能当答案），与 `<queries>` 取交集后的真实隐藏对象。
 
 ---
 
 ## 11. 结论（对下一步）
 
-事实层已经够写代码了，但有**两个卡点必须先定**：
+事实层与契约层都已落地：
 
-1. **证据通道**（§8）——不定就没法按 L15/L18 验收；
-2. **抛错契约**（§10-1）——写错就是"应用第一次自检就崩"。
+1. **证据通道**已定 A 并写成 L15.2（目标私有目录落盘 + App 批量归集）；
+2. **抛错契约**已真机测完（含原以为返回 `null`、实际抛 `IllegalArgumentException` 的 `getInstallerPackageName`）。
 
-这两项定完，`ApplicationPackageManager` 六族方法的钩子可以一次写完（判定函数 + 适配器，代码量不大），不需要再回 dex 取签名。
+剩下只有"应用 uid 的可见集"和"`Runtime.exec(\"pm\")` 旁路"两项待测，但它们影响的是**名单生效范围**与**旁路清单**，不阻塞钩子代码结构。`ApplicationPackageManager` 六族方法可以开工。
