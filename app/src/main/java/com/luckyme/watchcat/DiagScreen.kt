@@ -23,11 +23,16 @@ class DiagScreen(private val act: MainActivity) {
     private val capText = Ui.tv(act, "尚未跑过本轮探测。上次结果见 files/capability_v2.json。", 11.5f, Ui.MUTED)
     private val capRows = Ui.col(act)
 
+    // 数据面（剪贴板）现状：闸门、钩子、审计三样分开显示，不合成一句"已保护"
+    private val clipText = Ui.tv(act, "读取中…", 11.5f, Ui.MUTED)
+    private val clipEvents = Ui.col(act)
+
     private var report: CapabilityProbe.Report? = null
 
     init {
         build()
         refreshEngine()
+        refreshClip()
     }
 
     fun view(): View = root
@@ -64,6 +69,32 @@ class DiagScreen(private val act: MainActivity) {
         engCard.addView(Ui.tv(act, "Zig 引擎", 14.5f, Ui.TEXT, bold = true))
         engCard.addView(engineText)
         body.addView(engCard)
+
+        // 数据面：剪贴板读方向（A 阶段自适应项）
+        body.addView(Ui.spacer(act, 10))
+        val clipCard = Ui.card(act)
+        clipCard.addView(Ui.tv(act, "数据面 · 剪贴板", 14.5f, Ui.TEXT, bold = true))
+        clipCard.addView(
+            Ui.tv(
+                act,
+                "只动「读」方向：其余应用读到空，输入法与系统身份放行；写方向与系统提示都不碰。",
+                11f,
+                Ui.MUTED,
+            ),
+        )
+        clipCard.addView(Ui.spacer(act, 6))
+        clipCard.addView(clipText)
+        val clipBtns = Ui.row(act)
+        clipBtns.setPadding(0, Ui.dp(act, 10), 0, 0)
+        clipBtns.addView(Ui.button(act, "启用", primary = true) { confirmClipEnable() })
+        clipBtns.addView(gap(8))
+        clipBtns.addView(Ui.button(act, "停用") { confirmClipDisable() })
+        clipBtns.addView(gap(8))
+        clipBtns.addView(Ui.button(act, "刷新") { refreshClip() })
+        clipCard.addView(clipBtns)
+        clipCard.addView(Ui.spacer(act, 8))
+        clipCard.addView(clipEvents)
+        body.addView(clipCard)
 
         // 能力表
         body.addView(Ui.sectionTitle(act, "能力表 v2", "本机哪些 op 写得进、哪些只能走权限通道、网络通道能不能用。换 ROM 就必须重测。"))
@@ -179,6 +210,107 @@ class DiagScreen(private val act: MainActivity) {
                 "注入：$markerText",
             if (snap.api >= 101) Ui.ACCENT else Ui.WARN,
         )
+    }
+
+    /**
+     * 剪贴板现状（L12 的"兜底 + 事件"两问，现读不缓存）：
+     *   · 闸门：本轮 bootId 是否匹配，匹配才算真的启用；
+     *   · 钩子：p3 marker 里的 hooked 数与方法名——证明"真挂上了"，不是"点了启用"；
+     *   · 审计：最近几条决策，谁读的、给的是什么。
+     */
+    fun refreshClip() {
+        clipText.text = "读取中…"
+        act.bg {
+            val st = runCatching { ClipGate.status() }.getOrNull()
+            act.ui {
+                if (st == null) {
+                    clipText.setTextColor(Ui.WARN)
+                    clipText.text = "读取失败：su 拿不到状态"
+                    clipEvents.removeAllViews()
+                    return@ui
+                }
+                val marker = st.markerText?.lineSequence()
+                    ?.map { it.trim() }
+                    ?.filter {
+                        it.startsWith("armed=") || it.startsWith("hooked=") ||
+                            it.startsWith("methods=") || it.startsWith("policy=")
+                    }
+                    ?.joinToString(" · ")
+                val gate = when {
+                    st.gateBootId == null -> "未启用（无闸门）"
+                    st.armedNow -> "已启用（bootId 匹配）"
+                    else -> "闸门过期（bootId 不符，需重新启用）"
+                }
+                clipText.setTextColor(if (st.armedNow) Ui.ACCENT else Ui.WARN)
+                clipText.text = buildString {
+                    append("闸门：").append(gate).append('\n')
+                    append("钩子：")
+                        .append(marker ?: "无 p3 marker（system_server 还没执行到钩子安装）")
+                        .append('\n')
+                    append("失败计数：").append(st.failCount ?: "-")
+                    append(" · 自动停用：").append(if (st.tripped != null) "已触发" else "未触发").append('\n')
+                    append("审计：")
+                        .append(if (st.events.isEmpty()) "暂无事件" else "${st.events.size} 条（最近 20）")
+                }
+                clipEvents.removeAllViews()
+                if (st.events.isNotEmpty()) {
+                    clipEvents.addView(Ui.tv(act, "最近事件", 12f, Ui.TEXT, bold = true))
+                    st.events.takeLast(8).forEach {
+                        clipEvents.addView(Ui.tv(act, "· $it", 10.5f, Ui.MUTED))
+                    }
+                }
+            }
+        }
+    }
+
+    private fun confirmClipEnable() {
+        android.app.AlertDialog.Builder(act)
+            .setTitle("启用剪贴板保护？")
+            .setMessage(
+                "会做：\n" +
+                    "· 其余应用读剪贴板时拿到「空」，默认模式；\n" +
+                    "· 输入法与 root/system 身份照旧放行，你自己的粘贴不受影响；\n" +
+                    "· 每次读取记一条审计，写 /data/system/watchcat.events。\n\n" +
+                    "不会做：\n" +
+                    "· 不改「复制」这个动作（写方向不钩）；\n" +
+                    "· 不压 Android 的「已粘贴来自…」提示；\n" +
+                    "· 不伪造内容（替身模式需要在策略里显式开）。\n\n" +
+                    "写入靠 su；装好后要重启一次框架才会装载钩子——只重启框架，不是重启手机。",
+            )
+            .setPositiveButton("启用") { d, _ ->
+                d.dismiss()
+                clipText.text = "写入中…"
+                act.bg {
+                    val msg = ClipGate.enable(act)
+                    act.ui {
+                        act.toast(msg.lineSequence().first())
+                        clipText.text = msg
+                        refreshClip()
+                    }
+                }
+            }
+            .setNegativeButton("取消") { d, _ -> d.dismiss() }
+            .show()
+    }
+
+    private fun confirmClipDisable() {
+        android.app.AlertDialog.Builder(act)
+            .setTitle("停用剪贴板保护？")
+            .setMessage(
+                "删掉闸门与策略文件，行为立刻恢复原样；钩子仍留在进程里，但读不到策略就一律放行。\n审计事件保留。",
+            )
+            .setPositiveButton("停用") { d, _ ->
+                d.dismiss()
+                act.bg {
+                    val msg = ClipGate.disable()
+                    act.ui {
+                        act.toast(msg)
+                        refreshClip()
+                    }
+                }
+            }
+            .setNegativeButton("取消") { d, _ -> d.dismiss() }
+            .show()
     }
 
     private fun runCapability() {

@@ -33,15 +33,19 @@ logcat 与 `/proc/<pid>/maps` 都列为**禁止判据**。
 | `/data/adb/watchcat/` | `0700 root:root`，**只有 root 上下文的脚本能写**；system_server（uid 1000）过不了 DAC，不能拿它当 system_server 的落点 |
 | `boot.marker` / `service.marker` | 证明模块脚本真跑了（含 fingerprint / sdk / uptime / fail） |
 | `fail.count` / `last.boot` | 跨重启的心跳计数与上一轮 boot_id（L10.3 的判据，**不许每次开机清零**） |
-| `armed` | **不存在就是不启用**。P0 不写它，所以永远是「不启用」状态 |
+| `armed` | 旧位置的闸门，**已不用**（system_server 读不到 `/data/adb`，L17.1）；每次开机照样清掉，避免半启用 |
 | `p0.probe` | 回退副本：`/data/system` 写失败时才写这里；同样**无条件**写，与 `armed` 无关 |
 
-`/data/system` 下还有两个由模块运行时写出来的东西：
+`/data/system` 下由模块运行时/App 写出来的东西：
 
-| 路径 | 说明 |
-|---|---|
-| `watchcat.heartbeat` | system_server 里的心跳（带 `bootId`）。root 脚本在**下一次开机**拿它结算「上一轮有没有活」 |
-| `watchcat.tripped.marker` | 连续两轮没心跳时由脚本写的停用记录（`fail=2`），诊断页要读它 |
+| 路径 | 写的人 | 说明 |
+|---|---|---|
+| `watchcat.heartbeat` | system_server | 心跳（带 `bootId`）。root 脚本在**下一次开机**拿它结算「上一轮有没有活」 |
+| `watchcat.tripped.marker` | post-fs-data | 连续两轮没心跳时的停用记录（`fail=2`），诊断页要读它 |
+| `watchcat.p3_clip_hook.marker` | system_server | 剪贴板钩子的探针：`armed` / `policy` / `hooked` / `methods`。**无条件写**，用来区分「没启用」与「没钩上」 |
+| `watchcat.clip.policy` | App（`su`） | 剪贴板策略：`default` / `imeuid` / `allow` / `mode.<uid>` / `pool`；`0600 system:system` |
+| `watchcat.armed` | App（`su`） | 启用闸门，第一行 `bootId=…` 必须等于当前 boot_id，否则等于没启用；每次开机由 `post-fs-data.sh` 删除 |
+| `watchcat.events` | system_server | 剪贴板审计，一行一条 `ts/uid/pkg/m/mode`，超过 96 KB 只留最近 200 行 |
 
 `/data/adb/watchcat/p0.probe` 写不出来不算缺陷：它只是 `/data/system` 的回退位，不是通道。
 真正的通道是 remote preferences（框架托管，配置属于模块包），**策略与规则一律不放 `/data/adb`**（规范 L17）。

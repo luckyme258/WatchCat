@@ -51,6 +51,9 @@ chmod 600 "$WC/last.boot" 2>/dev/null
 
 # armed 不跨重启（L10.1：装完即生效是禁止行为，每次开机都要用户重新确认）
 rm -f "$WC/armed" 2>/dev/null
+# A 阶段起闸门落在 /data/system（/data/adb 是 0700 root:root，system_server 读不到，L17.1），
+# 两个位置一起清，避免"adb 侧删了、system 侧还留着"的半启用状态。
+rm -f /data/system/watchcat.armed 2>/dev/null
 
 # 连续两轮拿不到心跳 → 自动停用，并在诊断页可见的位置留一条 tripped
 if [ "$FAIL" -ge 2 ]; then

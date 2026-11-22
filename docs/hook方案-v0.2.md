@@ -325,7 +325,7 @@ Magisk/KernelSU 的具体版本门槛来自第三方指南、作者 README 只�
 | **B 应用列表** | 四面覆盖 + 自洽 + 名单编辑/导入导出 | 可用的列表伪造 | 2–4 天 |
 | **C 打磨** | 分池词库、简版审计页、自动停用 UI、诊断页接入 | 收尾 | 1–2 天 |
 
-P0 的四条里 **① 与 ③ 已结项**：① 的结论是"Zig 只留哨兵"（L16），③ 的结论是"心跳与闸门落 `/data/system`"（L17）。剩下 ②（方法族真实签名打点）与 ④（作用域与热生效）不单独开一轮，边做 A 阶段边补。
+P0 的四条里 **① 与 ③ 已结项**：① 的结论是"Zig 只留哨兵"（L16），③ 的结论是"心跳与闸门落 `/data/system`"（L17）。**② 已结项（2026-11-22）**：不再打点，直接拉真机 `services.jar` 用 `dexdump` 读声明，`ClipboardService` 的读方向重载全部是 `(String pkg, String attributionTag, int userId, int deviceId)` 四参形态，`hasPrimaryClip` / `hasClipboardText` 返回 `boolean`；对应实现在 `xposed/ClipboardHook.kt`。**④ 作用域与热生效** 仍按"每次开机重新确认 + `stop/start` 重载"处理，不单独开一轮。
 
 每阶段都走 CI 出包、真机装、靶子验，**不在本机出包**（G0.0）。
 
@@ -375,6 +375,9 @@ P0 的四条里 **① 与 ③ 已结项**：① 的结论是"Zig 只留哨兵"�
 2. **证据通道定案**：只看 `/data/system/watchcat.*` 落盘；`logcat`、`/proc/<pid>/maps`、`/data/adb` 状态目录**禁止**当判据（L15.1）。
 3. **P0 ① 结项**：`ping=0x5743` / `version=0x00020000` / pid 1996，提交 `68ec8d0`。
 4. **应用列表优先级下调**：先让剪贴板从"装了但零行为"变成"装了真的有行为"，再做列表；理由是与《P1-框架接入.md》"下一步 P2"一致，也避免两条主线同时改判定层。
+5. **闸门与策略落 `/data/system`**（2026-11-22 实测）：root 能在该目录建文件（`0644 root:root`、label `system_data_file`），system_server（uid 1000）能读；App 经 `su` 写、system_server 读、诊断页再 `su` 读，三段各自可独立验证。`/data/adb/watchcat` 继续只放模块脚本自己的状态（0700 root:root）。
+6. **输入法 uid 由 App 侧算**（`Settings.Secure.DEFAULT_INPUT_METHOD` → `getPackageUid`，包可见性兜底走 `dumpsys`），写进策略的 `imeuid=`；hook 侧只用 `Binder.getCallingUid()`，不解析包名、不碰私有 API。
+7. **BLOCK 本期不上**：框架的 `PROTECTIVE` 异常模式会把钩子里抛出的异常吞掉并继续走原逻辑，要让阻断生效只能整钩改 `PASSTHROUGH`，那会把我们自己的 bug 也变成崩溃。策略里写 `block` 会被降级成 `empty`，并在审计行标 `downgrade=block`，不假装做到了。
 
 **已定（2026-11-21）**
 

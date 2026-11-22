@@ -81,6 +81,14 @@ public final class WatchCatModule extends XposedModule {
         // L10.2：启动后 90 秒内必须有一次心跳。这里是最早的可靠时机，够用且不必起线程
         // （hook 侧零常驻状态，起线程就要管生命周期，属于自找的复杂度）。
         writeHeartbeat();
+
+        // A 阶段：剪贴板读方向的钩子。默认不挂（armed 不存在或 bootId 对不上），
+        // 但不论挂没挂都会写 /data/system/watchcat.p3_clip_hook.marker（L17.2.1）。
+        try {
+            ClipboardHook.install(this, param.getClassLoader());
+        } catch (Throwable t) {
+            log(Log.ERROR, TAG, "p3: clipboard hook install failed", t);
+        }
     }
 
     private boolean hasCap(long prop) {

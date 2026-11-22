@@ -133,6 +133,11 @@ jobs:
       - name: 组装 debug APK
         run: gradle :app:assembleDebug --no-daemon --stacktrace
 
+      # 判定层单测：剪贴板三态与策略解析在 JVM 里验，不占真机回环。
+      # 判定逻辑（ClipPolicy/ClipFake）不许出现 android.*，否则单测会退化成 Robolectric。
+      - name: 判定层单测（剪贴板）
+        run: gradle :app:testDebugUnitTest --no-daemon --stacktrace
+
       # P1 闸门：模块描述必须真的进 APK，否则 Vector 会把它当普通应用
       - name: 校验 LSP 模块描述
         run: |

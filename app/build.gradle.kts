@@ -32,8 +32,8 @@ android {
         applicationId = "com.luckyme.watchcat"
         minSdk = 30
         targetSdk = 36
-        versionCode = 3
-        versionName = "0.3.0"
+        versionCode = 4
+        versionName = "0.4.0"
 
         // 只打 packagedAbis（默认 arm64-v8a），见文件顶部说明
         ndk {
@@ -100,4 +100,7 @@ dependencies {
     implementation("io.github.libxposed:service:101.0.0") {
         exclude(group = "org.jetbrains.kotlin")
     }
+
+    // 判定层单测（L16.2.1 的替代品）：纯 JVM、CI 里跑，不碰 Android 类型
+    testImplementation("junit:junit:4.13.2")
 }
