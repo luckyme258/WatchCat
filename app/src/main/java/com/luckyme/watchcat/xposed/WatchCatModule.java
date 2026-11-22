@@ -75,15 +75,19 @@ public final class WatchCatModule extends XposedModule {
         return (getFrameworkProperties() & prop) != 0;
     }
 
+    /**
+     * marker 落盘位置按「DAC + SELinux 实际能不能写」排序，逐个试：
+     *
+     *   1. /data/system/watchcat.marker —— system_server 自己的数据目录。
+     *      同机 ClipBox（legacy 模块，同样跑在 system_server 里）能写
+     *      /data/system/clipbox_config.json，说明这条路径在 uid 1000 下确实可写。
+     *   2. /data/adb/watchcat/system_server.marker —— KernelSU 模块目录。
+     *      它是 0700 root:root，system_server 写不进去（DAC 就拦了），留着只为
+     *      将来若把目录改成 0771 root:system 时能继续用。
+     *
+     * 两个都失败只记 errno，不重试、不影响开机。
+     */
     private void writeMarker() {
-        final File dir = new File(STATE_DIR);
-        final File marker = new File(dir, "system_server.marker");
-        // P1 的证据不该依赖 P0 模块是否装过：目录不存在就自己建，建不出来再记原因。
-        // 之前没 mkdirs，导致没装 Zygisk 模块时 marker 永远是“未找到”，看起来像回调没跑。
-        if (!dir.isDirectory() && !dir.mkdirs()) {
-            log(Log.WARN, TAG, "p1: marker dir unavailable (probe only): " + dir.getAbsolutePath());
-            return;
-        }
         final String line = "stage=system_server"
                 + "\npid=" + Process.myPid()
                 + "\nframework=" + getFrameworkName()
@@ -92,12 +96,20 @@ public final class WatchCatModule extends XposedModule {
                 + "\napi=" + getApiVersion()
                 + "\ntimeMs=" + System.currentTimeMillis()
                 + "\n";
-        try (FileOutputStream out = new FileOutputStream(marker, false)) {
-            out.write(line.getBytes(StandardCharsets.UTF_8));
-            log(Log.INFO, TAG, "p1: marker written " + marker.getAbsolutePath());
-        } catch (Throwable t) {
-            log(Log.WARN, TAG, "p1: marker write failed (probe only, not fatal): "
-                    + marker.getAbsolutePath() + " " + t);
+        final String[] candidates = {
+                "/data/system/watchcat.marker",
+                STATE_DIR + "/system_server.marker",
+        };
+        for (String path : candidates) {
+            final File marker = new File(path);
+            try (FileOutputStream out = new FileOutputStream(marker, false)) {
+                out.write(line.getBytes(StandardCharsets.UTF_8));
+                log(Log.INFO, TAG, "p1: marker written " + path);
+                return;
+            } catch (Throwable t) {
+                log(Log.WARN, TAG, "p1: marker write failed (probe only, not fatal): "
+                        + path + " " + t);
+            }
         }
     }
 }
