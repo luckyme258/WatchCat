@@ -411,6 +411,7 @@ P0 的四条里 **① 与 ③ 已结项**：① 的结论是"Zig 只留哨兵"�
 | 默认空路径 | 起一次淘宝 / 抖音 | `uid=10181 pkg=com.taobao.taobao m=HAS mode=EMPTY`、`uid=10179 pkg=com.ss.android.ugc.aweme m=HAS mode=EMPTY` |
 | 策略现读（不重载） | 同一进程内把 `default=empty` 改成 `default=allow`，再起淘宝 | 紧接着的审计变成 `m=HAS/CLIP mode=ALLOW`，**没有重启框架** |
 | 停用即时生效 | `rm` 策略文件后起淘宝 | 审计行数不再增长（钩子在、读不到策略就放行，§8.3） |
+| 替身路径 | 策略加 `mode.10181=fake` / `mode.10179=fake`、`pool=社交`，再起淘宝 | `m=HAS mode=FAKE`、`m=CLIP mode=FAKE` 连出 5 行；对照 EMPTY 时淘宝只问两次 `HAS` 就不再去 `CLIP` —— **返回值确实变了，不是只改了审计文案** |
 | App 按钮链路 | 真机点「停用」→「启用」 | 停用后 `armed`/`policy` 两个文件都不在；启用后按 `ClipGate` 的格式重建：`default=empty`、`imeuid=10189`、`allow=10199`（把自己的 uid 列白，保证 App 自己粘贴不受影响）、`bootId=` 为当前 boot_id、`0600 system:system` |
 | 诊断页 | 打开「数据面 · 剪贴板」卡片 | 读数与 marker 一致：「闸门：已启用（bootId 匹配）」「钩子：armed=yes · policy=ok · hooked=5 · methods=…」「失败计数：0 · 自动停用：未触发」「审计：N 条」 |
 
@@ -418,6 +419,8 @@ P0 的四条里 **① 与 ③ 已结项**：① 的结论是"Zig 只留哨兵"�
 
 1. 钩点类名猜错 → `hooked=0` 且无任何报错。五个读方法在**内层** `ClipboardService$ClipboardImpl`，外层 `ClipboardService` 一个都没有（见 §4.1）。现在 marker 用 `noclass` / `miss` / `fail` 把三种失败分开落盘。
 2. `stop` 与 `start` 拆成两条执行会黑屏失联（L18.6）。必须一条命令连写，一次开机窗口只做一次。
+
+**替身内容的核对口径（尚未做屏幕级核对，别当成已验）**：替身文本本身只做到"单测级"——`ClipPolicyTest` 覆盖了同 `(uid, bootId)` 稳定、6–40 字；真机上只验到"应用拿到的是非空 ClipData（因此继续 `CLIP`）"。想在屏幕上直接看到那条文本很难：淘宝的粘贴提示在 WebView 里，`uiautomator dump` 导不出来。真要验内容，得加一个自建的读取靶子（App 内"剪贴板自检"），那要再走一轮 CI。
 
 ---
 
