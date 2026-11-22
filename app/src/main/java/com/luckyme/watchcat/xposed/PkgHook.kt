@@ -145,7 +145,7 @@ object PkgHook {
             selfUid = android.os.Process.myUid(),
             dataDir = dataDir,
             bootId = readBootId(),
-            source = Source(openPrefs(api), File("$dataDir/files/$F_POLICY")),
+            source = Source(openPrefs(api), File("$dataDir/files/$F_POLICY"), "policy.$pkgName"),
         )
         val snap = ctx.source.current()
         val armed = PkgPolicy.enabled(snap, ctx.bootId)
@@ -490,9 +490,16 @@ object PkgHook {
      * 策略来源：**remote preferences 优先**（正式通道，目标应用读不到框架托管的那份），
      * 回退到目标应用私有目录里的 `watchcat.p2.policy`（只给联调/真机验证用，root 用 su 写）。
      *
+     * 一个 group 里按目标应用存键：`policy.<目标包名>` 优先，其次兼容旧的单键 `policy`
+     * （旧单键语义是"所有目标共用一份"，只在没有按包键时兜底）。
+     *
      * 每次判定都会查一次：prefs 是内存 map（无 binder），file 走 mtime 比较，没变就不读盘。
      */
-    private class Source(private val prefs: SharedPreferences?, private val file: File) {
+    private class Source(
+        private val prefs: SharedPreferences?,
+        private val file: File,
+        private val key: String,
+    ) {
         @Volatile
         private var lastText: String? = null
 
@@ -519,8 +526,10 @@ object PkgHook {
 
         private fun read(): String? {
             try {
-                val t = prefs?.getString("policy", null)
+                val t = prefs?.getString(key, null)
                 if (!t.isNullOrBlank()) return t
+                val legacy = prefs?.getString("policy", null)
+                if (!legacy.isNullOrBlank()) return legacy
             } catch (t: Throwable) {
                 // 框架没连上/被拒，继续走文件回退
             }

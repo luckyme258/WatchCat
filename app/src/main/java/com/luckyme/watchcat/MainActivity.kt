@@ -30,6 +30,7 @@ class MainActivity : Activity() {
     private var detail: DetailScreen? = null
     private var log: LogScreen? = null
     private var diag: DiagScreen? = null
+    private var target: TargetScreen? = null
     private var current = 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -65,6 +66,7 @@ class MainActivity : Activity() {
         tabRow = Ui.row(this, Gravity.CENTER)
         tabRow.setBackgroundColor(0xFF08080A.toInt())
         addTab("应用")
+        addTab("目标")
         addTab("日志")
         addTab("诊断")
         rootLayout.addView(tabRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, Ui.dp(this, 54)))
@@ -123,7 +125,8 @@ class MainActivity : Activity() {
         selectTab(index)
         val v: View = when (index) {
             0 -> (apps ?: AppsScreen(this).also { apps = it }).view()
-            1 -> (log ?: LogScreen(this).also { log = it }).also { it.refresh() }.view()
+            1 -> (target ?: TargetScreen(this).also { target = it }).also { it.refresh() }.view()
+            2 -> (log ?: LogScreen(this).also { log = it }).also { it.refresh() }.view()
             else -> (diag ?: DiagScreen(this).also { diag = it }).also { it.refreshEngine() }.view()
         }
         content.removeAllViews()
@@ -179,6 +182,8 @@ class MainActivity : Activity() {
     override fun onBackPressed() {
         if (detail != null) {
             showTab(current)
+        } else if (current == 1 && target?.back() == true) {
+            // 目标页的编辑器返回列表，不退出应用
         } else {
             @Suppress("DEPRECATION")
             super.onBackPressed()
