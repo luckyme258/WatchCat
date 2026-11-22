@@ -43,6 +43,12 @@ uint32_t wc_engine_ping(void);
 static const char *kArmFile = "/data/adb/watchcat/armed";
 static const char *kProbeFile = "/data/adb/watchcat/p0.probe";
 
+// 证据落点：/data/adb/watchcat 是 0700 root:root，system_server（uid 1000）写不进去；
+// /data/system 可以（同机 ClipBox 在 system_server 里写 /data/system/clipbox_config.json
+// 是现成的权限证明）。P1 的 marker 也在 2026-11-22 实测中靠这个落点才第一次拿到证据。
+static const char *kProbeSystem = "/data/system/watchcat.p0.probe";
+static const char *kShimLoaded = "/data/adb/watchcat/shim.loaded";
+
 // 只读存在性，不读内容：P0 不消费规则，问「有没有」就够，少一次解析就少一个失败点
 static bool armed_present() {
     int fd = open(kArmFile, O_RDONLY | O_CLOEXEC);
@@ -51,18 +57,19 @@ static bool armed_present() {
     return true;
 }
 
-// system_server（u:r:system_server:s0）写 /data/adb 很可能被 SELinux 拒。
-// 这不是失败：说明它是「探针」，不是「通道」——真正的通道是 remote preferences。
-// 写不进去就把 errno 记下来，用户一看就知道该往哪查。
-static void try_write_probe(const char *line) {
-    int fd = open(kProbeFile, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
-    if (fd < 0) {
-        LOGW("p0: 写 probe 失败（不是崩溃，只是没权限）: errno=%d (%s)", errno, strerror(errno));
-        return;
-    }
+static bool write_to(const char *path, const char *line) {
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    if (fd < 0) return false;
     ssize_t n = write(fd, line, strlen(line));
-    if (n < 0) LOGW("p0: probe 写入中断: errno=%d", errno);
     close(fd);
+    return n >= 0;
+}
+
+// 探针是诊断，不是功能：不论 armed 与否都写，写不进去只记 errno 就放弃。
+static void write_probe(const char *line) {
+    if (write_to(kProbeSystem, line)) return;
+    if (write_to(kProbeFile, line)) return;
+    LOGW("p0: probe 两个落点都写失败（探针降级，不影响开机）");
 }
 
 class WatchCatModule : public zygisk::ModuleBase {
@@ -71,6 +78,12 @@ public:
         // P0 不保存 api/env：拿了不用也得拿，但存下来会让人以为这里已经会钩东西了
         (void)api;
         (void)env;
+        // onLoad 跑在 zygote（root），这条能写出来就证明 shim 被 Zygisk 装进来了；
+        // 它比 p0.probe 更早、更底层，用来把「没加载」和「加载了但没进 server 阶段」分开。
+        char line[96];
+        snprintf(line, sizeof(line), "stage=onLoad pid=%d version=0x%08x\n",
+                 (int)getpid(), wc_engine_version());
+        write_to(kShimLoaded, line);
     }
 
     // 每个 app 进程都走这里。P0 明确什么都不做——开销为零，绝不在别人的应用里留副作用。
@@ -81,7 +94,11 @@ public:
     // 只有 system_server 会走到这两个回调，所以**不需要**去猜进程名（规范 L4：不靠猜）
     void preServerSpecialize(zygisk::ServerSpecializeArgs *args) override {
         (void)args;
-        LOGI("p0: 进入 system_server 的 pre 阶段（zygote 权限），pid=%d", (int)getpid());
+        const int pid = (int)getpid();
+        LOGI("p0: 进入 system_server 的 pre 阶段（zygote 权限），pid=%d", pid);
+        char line[96];
+        snprintf(line, sizeof(line), "stage=preServerSpecialize pid=%d\n", pid);
+        write_probe(line);
     }
 
     void postServerSpecialize(const zygisk::ServerSpecializeArgs *args) override {
@@ -94,18 +111,18 @@ public:
         LOGI("p0: system_server 内调用 Zig 引擎 ping=0x%04x version=0x%08x pid=%d",
              ping, ver, pid);
 
-        const bool armed = armed_present();
-        if (!armed) {
+        char line[160];
+        snprintf(line, sizeof(line), "stage=postServerSpecialize pid=%d ping=0x%04x version=0x%08x\n",
+                 pid, ping, ver);
+        write_probe(line);
+
+        if (!armed_present()) {
             // 规范 L10「默认不生效」：没 armed 就到此为止，不做任何判定、不注册任何 hook
             LOGI("p0: armed 不存在 → 本次不启用任何功能（这是默认状态，不是错误）");
             return;
         }
 
         // 就算 armed 了，P0 也只多写一行证据；真正的 hook 要等规则通道做完
-        char line[160];
-        snprintf(line, sizeof(line),
-                 "pid=%d ping=0x%04x version=0x%08x armed=1\n", pid, ping, ver);
-        try_write_probe(line);
         LOGI("p0: armed 存在，只记证据，不注册 hook");
     }
 };
