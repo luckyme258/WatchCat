@@ -114,6 +114,30 @@ object P2Device {
         return Injection(marker, events, err)
     }
 
+    /**
+     * 一次 su 批量读多个目标的事件（列表页跨目标汇总用）。
+     *
+     * 纪律：**禁止逐条 su**（一次 fork 一个 root shell 的代价在列表页会被放大）——
+     * 一条 `su -M -c` 里用 shell 循环把这些文件依次 cat 出来，用 `@@<pkg>` 分隔。
+     */
+    fun eventsBatch(pkgs: List<String>): Map<String, List<String>> {
+        if (pkgs.isEmpty()) return emptyMap()
+        val names = pkgs.joinToString(" ")
+        val cmd = "for p in $names; do echo \"@@\$p\"; tail -n 120 /data/user/0/\$p/files/watchcat.p2.events.jsonl 2>/dev/null; done"
+        val r = Shell.suMount(cmd)
+        if (r.output.isBlank()) return emptyMap()
+        val out = LinkedHashMap<String, MutableList<String>>()
+        var cur: MutableList<String>? = null
+        for (line in r.output.lineSequence()) {
+            if (line.startsWith("@@")) {
+                cur = out.getOrPut(line.removePrefix("@@").trim()) { mutableListOf() }
+            } else if (line.isNotBlank()) {
+                cur?.add(line)
+            }
+        }
+        return out
+    }
+
     private fun parseKv(text: String): Map<String, String> = text.lineSequence()
         .map { it.trim() }
         .filter { it.contains('=') }

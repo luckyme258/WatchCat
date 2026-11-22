@@ -134,6 +134,8 @@ class TargetScreen(private val act: MainActivity) {
         body.addView(filterRow)
         body.addView(Ui.spacer(act, 10))
 
+        renderRemedyBoard(cfg)
+
         val visible = apps.filter { showSystem || (it.first.flags and ApplicationInfo.FLAG_SYSTEM) == 0 }
         val card = Ui.card(act, 1)
         visible.forEach { (info, label) ->
@@ -145,7 +147,13 @@ class TargetScreen(private val act: MainActivity) {
             col.addView(Ui.tv(act, label, 13f, Ui.TEXT, bold = true))
             col.addView(Ui.tv(act, pkg, 10.5f, Ui.MUTED))
             row.addView(col, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-            if (pkg in cfg) row.addView(Ui.pill(act, "已配置", Ui.ACCENT))
+            // 行尾直接给"生效没生效 + 现在是什么姿态"，点一下可以就地切三态。
+            val st = statusFor(pkg, cfg)
+            if (st != null) {
+                row.addView(Ui.chip(act, st.first, st.second, if (st.second) Ui.ACCENT else Ui.WARN) {
+                    quickMode(pkg, label)
+                })
+            }
             row.setOnClickListener { openEditor(pkg, label) }
             card.addView(row)
             if (info != visible.last().first) card.addView(Ui.divider(act))
@@ -156,11 +164,164 @@ class TargetScreen(private val act: MainActivity) {
         body.addView(
             Ui.tv(
                 act,
-                "提示：目标应用第一次生效必须冷启动（它自己进程里才装钩子）；策略改动是按调用现读的，一般不用重启。",
+                "提示：切了模式立刻下发，但目标应用要冷启动才装钩子；「已配置但未启用」= 名单存下来了、判定没跑。",
                 10.5f,
                 Ui.FAINT,
             ).also { it.setPadding(0, Ui.dp(act, 10), 0, 0) },
         )
+    }
+
+    /** 行尾状态：null = 没配过；"-" 类前缀没有特殊含义，只是让两列对齐好读。 */
+    private fun statusFor(pkg: String, cfg: Set<String>): Pair<String, Boolean>? {
+        if (pkg !in cfg) return null
+        val t = runCatching { P2Store.read(act, pkg) }.getOrNull() ?: return "已配置" to false
+        if (!t.armed) return "未启用 · 不判定" to false
+        if (t.bootId != null && t.bootId != P2Store.bootId()) return "开机后失效" to false
+        return when (t.mode) {
+            PkgPolicy.Mode.SHOW -> "只看基础 · 传${t.show.size}" to true
+            PkgPolicy.Mode.HIDE -> "藏${t.hide.size}" + (if (t.rom) "+ROM" else "") to true
+        }
+    }
+
+    /** 三态就地切换：只看基础 / 全部可见 / 自定义。选完立即下发，不做"等用户记得点保存"这种坑。 */
+    private fun quickMode(pkg: String, label: String) {
+        val cur = runCatching { P2Store.read(act, pkg) }.getOrNull()
+        val idx = when {
+            cur == null -> 0
+            !cur.armed -> 1
+            cur.mode == PkgPolicy.Mode.SHOW -> 0
+            else -> 2
+        }
+        android.app.AlertDialog.Builder(act)
+            .setTitle("$label：这个应用能看到什么")
+            .setSingleChoiceItems(
+                arrayOf(
+                    "只看基础（最小暴露，默认）",
+                    "全部可见（关掉伪装）",
+                    "自定义（自己选要藏哪些）",
+                ),
+                idx,
+            ) { dlg, which ->
+                dlg.dismiss()
+                applyMode(pkg, label, which)
+            }
+            .setNegativeButton("取消") { dlg, _ -> dlg.dismiss() }
+            .show()
+    }
+
+    private fun applyMode(pkg: String, label: String, which: Int) {
+        act.bg {
+            val base = BaseSet.collect(act.packageManager, P2Store.currentImeId(act))
+            val cur = runCatching { P2Store.read(act, pkg) }.getOrNull()
+            val t = when (which) {
+                0 -> P2Store.Target(
+                    pkg = pkg,
+                    armed = true,
+                    mode = PkgPolicy.Mode.SHOW,
+                    show = cur?.show?.takeIf { it.isNotEmpty() } ?: base,
+                )
+                1 -> P2Store.Target(
+                    pkg = pkg,
+                    armed = false,
+                    mode = PkgPolicy.Mode.SHOW,
+                    show = cur?.show?.takeIf { it.isNotEmpty() } ?: base,
+                )
+                else -> P2Store.Target(
+                    pkg = pkg,
+                    armed = true,
+                    mode = PkgPolicy.Mode.HIDE,
+                    hide = cur?.hide ?: emptySet(),
+                    rom = cur?.rom ?: false,
+                )
+            }
+            val msg = P2Store.save(act, t)
+            act.ui {
+                act.toast(msg)
+                renderList()
+                if (which == 2) act.toast("自定义：点这一行进编辑器勾选要藏的包")
+            }
+        }
+    }
+
+    /**
+     * 跨目标补救汇总：把各目标事件里"被藏了还问"的包聚合到列表页。
+     *
+     * 单个`su`批量读（见 [P2Device.eventsBatch]），只统计 `nnf/iae`；一个包被 ≥2 个目标问过就值得置顶，
+     * 因为这些包往往是登录/分享的公共依赖，藏了以后用户会在好几个应用里遇到"打不开"。
+     */
+    private fun renderRemedyBoard(cfg: Set<String>) {
+        if (cfg.isEmpty()) return
+        act.bg {
+            val batch = P2Device.eventsBatch(cfg.toList())
+            val counts = LinkedHashMap<String, Int>()
+            val owners = LinkedHashMap<String, MutableSet<String>>()
+            for ((target, events) in batch) {
+                for (r in P2Device.remedies(events)) {
+                    counts[r.pkg] = (counts[r.pkg] ?: 0) + r.count
+                    owners.getOrPut(r.pkg) { mutableSetOf() }.add(target)
+                }
+            }
+            val entries = counts.entries
+                .filter { owners[it.key]!!.size >= 2 }
+                .sortedByDescending { it.value }
+                .take(6)
+                .map { it.key to (it.value to owners[it.key]!!) }
+            if (entries.isEmpty()) return@bg
+            val labels = entries.associate { (pkg, _) ->
+                pkg to runCatching {
+                    act.packageManager.getApplicationLabel(act.packageManager.getApplicationInfo(pkg, 0)).toString()
+                }.getOrDefault(pkg)
+            }
+            act.ui {
+                val card = Ui.card(act)
+                card.addView(Ui.tv(act, "补救 · 多个应用都在找这些包", 13.5f, Ui.TEXT, bold = true))
+                card.addView(
+                    Ui.tv(act, "它们被藏了，而且不止一个应用问过；点一下给这些目标全部放行。", 10.5f, Ui.MUTED)
+                        .also { it.setPadding(0, Ui.dp(act, 2), 0, 0) },
+                )
+                entries.forEach { (pkg, pair) ->
+                    val (count, owners) = pair
+                    val row = Ui.row(act)
+                    row.setPadding(0, Ui.dp(act, 8), 0, 0)
+                    val name = labels[pkg] ?: pkg
+                    row.addView(
+                        Ui.tv(act, "$name  ×$count · ${owners.size} 个应用问过", 11.5f, Ui.TEXT),
+                        LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
+                    )
+                    row.addView(Ui.chip(act, "全部放行", true, Ui.WARN) {})
+                    row.getChildAt(1).setOnClickListener { allowAcross(owners.toList(), pkg, name) }
+                    card.addView(row)
+                }
+                body.addView(card, 0)
+                body.addView(Ui.spacer(act, 10), 1)
+            }
+        }
+    }
+
+    /** 把某个包对若干目标全部放行：只看基础→加进 show；隐藏名单→从 hide 删。逐目标 save（每个目标一条 prefs）。 */
+    private fun allowAcross(targets: List<String>, pkg: String, name: String) {
+        act.bg {
+            var ok = 0
+            val fails = mutableListOf<String>()
+            for (p in targets) {
+                val cur = runCatching { P2Store.read(act, p) }.getOrNull()
+                if (cur == null) { fails.add(p); continue }
+                val next = if (cur.mode == PkgPolicy.Mode.SHOW) {
+                    cur.copy(show = cur.show + pkg, armed = true)
+                } else {
+                    cur.copy(hide = cur.hide - pkg, armed = true)
+                }
+                val msg = P2Store.save(act, next)
+                if (msg.startsWith("已保存")) ok++ else fails.add(p)
+            }
+            act.ui {
+                act.toast(
+                    if (fails.isEmpty()) "已给 $ok 个目标放行 $name（记得让它们冷启动一次）"
+                    else "已放行 $ok 个，失败 ${fails.size} 个：${fails.joinToString(", ")}"
+                )
+                renderList()
+            }
+        }
     }
 
     private fun openEditor(pkg: String, label: String) {
