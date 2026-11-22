@@ -14,6 +14,16 @@ val storePass: String = System.getenv("WATCHCAT_KEYSTORE_PASS") ?: "android"
 val keyAliasName: String = System.getenv("WATCHCAT_KEY_ALIAS") ?: "androiddebugkey"
 val keyPass: String = System.getenv("WATCHCAT_KEY_PASS") ?: "android"
 
+// ---- ABI（规范 W13 / L8）：产物只出 arm64，模拟器调试显式加回来 ----
+// 默认只打 arm64-v8a：CI 与 Release 拿到的是同一个口径，不会出现「发布包里混进一份 x86_64」。
+// 本机跑模拟器要验对齐时才加：gradle -PwatchcatDevAbi=x86_64 :app:assembleDebug
+val devAbis: List<String> = (project.findProperty("watchcatDevAbi") as String?)
+    ?.split(',')
+    ?.map { it.trim() }
+    ?.filter { it.isNotEmpty() }
+    ?: emptyList()
+val packagedAbis: List<String> = listOf("arm64-v8a") + devAbis
+
 android {
     namespace = "com.luckyme.watchcat"
     compileSdk = 36
@@ -25,9 +35,9 @@ android {
         versionCode = 3
         versionName = "0.3.0"
 
-        // 只编两个 ABI：真机 arm64 + 模拟器 x86_64（规范 W13）
+        // 只打 packagedAbis（默认 arm64-v8a），见文件顶部说明
         ndk {
-            abiFilters += listOf("arm64-v8a", "x86_64")
+            abiFilters += packagedAbis
         }
     }
 

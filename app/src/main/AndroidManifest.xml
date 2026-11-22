@@ -17,6 +17,7 @@
     <application
         android:name=".WatchCatApp"
         android:label="WatchCat"
+        android:description="系统级剪贴板与权限审计工具：权限面可直接使用，数据面需装配套模块并手动启用，默认不改变任何行为。"
         android:icon="@drawable/ic_watchcat"
         android:hasCode="true"
         android:allowBackup="false"

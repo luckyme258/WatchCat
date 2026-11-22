@@ -249,9 +249,9 @@ Android 11 起 `<queries>` 让"应用只能看到一部分应用"成为常态，
 | `wc_engine_ping()` | — | `0x5743` | 固定魔数，证明这份 shim 链的是本仓库的引擎 |
 | `wc_engine_version()` | — | `0x00020000` | 版本口径，报障时用来对齐"你装的是哪一版" |
 
-**已撤回（不再实现）**：`wc_engine_create` / `destroy` / `reload`、`wc_clip_decide`、`wc_clip_pick`、`wc_app_visible`、`wc_app_filter`、`wc_stats_push`。撤回依据是 L16.2.1「业务不得放 native」；原先为防漂移写的 "`wc_app_filter` 与逐条 `wc_app_visible` 必须等价" 那条单测也随之作废——现在只有一条路径，不存在两条。
+**从导出面撤回（代码保留为规格）**：`wc_engine_rule_set` / `rule_clear` / `rule_count` / `wc_engine_decide`、以及更早草案里的 `create` / `destroy` / `reload` / `wc_clip_decide` / `wc_clip_pick` / `wc_app_visible` / `wc_app_filter` / `wc_stats_push`。依据是 L16.2.1「业务不得放 native」：`export fn` 已改成 `pub fn`，不再进 shim 的符号表、不参与任何热路径，只留作**判定语义的规格**——`zig test` 里那 7 个用例（并集、拒系统 uid、未知 kind 走放行）就是 Kotlin 实现必须逐条对上的验收表。原「`wc_app_filter` 与逐条 `wc_app_visible` 必须等价」那条防漂移单测随接口一起作废：现在只有一条路径。
 
-**仍然成立的单测口径**：Kotlin 判定层做表驱动单测进 CI（给定策略 + uid → 期望三态 / 期望保留集）。覆盖面比 `zig test` 更大，因为它能造真机造不出的输入。
+**仍然成立的单测口径**：Kotlin 判定层做表驱动单测进 CI（给定策略 + uid → 期望三态 / 期望保留集），断言内容照抄 `engine.zig` 里那 7 条。
 
 **16KB**：`.so` 必须过现有门禁（`tools/build_so.py` 已校验），ABI 只保留 `arm64-v8a`。
 

@@ -1,6 +1,6 @@
 id=watchcat
-name=WatchCat 数据面引擎（P0）
-version=v0.2-p0
-versionCode=2
+name=WatchCat 数据面模块
+version=v0.3.0
+versionCode=3
 author=luckyme258
-description=数据面 P0：只做加载探针，往 logcat 证明 Zig 引擎在 system_server 里能跑；不注册任何钩子、默认不生效，装上不改变任何行为。
+description=数据面加载探针：往 /data/system 落一份 Zig 引擎自检（ping=0x5743），不注册任何钩子、默认不生效，装上不改变任何行为。

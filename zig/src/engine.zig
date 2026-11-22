@@ -1,21 +1,23 @@
-//! WatchCat 数据面判定引擎（P0 空壳，但语义是真的）
+//! WatchCat 数据面引擎 —— **哨兵 + 判定规格**（2026-11-22 起按 L16.2.1 收缩）
 //!
 //! 与 `watchcat.zig` 的分工
 //!   watchcat.zig —— 权限面：给 JVM 用的 JNI 导出（appops 解析、命令拼装、能力判定）。
-//!   本文件      —— 数据面：**不导出 JNI 名字**，只导出朴素 C 符号，供 Zygisk 里的 C++ shim
-//!                  静态链接后直接调用。理由见《LSP模块2026开发规范》L2：
-//!                  native 只由 Zygisk 加载，hook 层零 UI/资源依赖；JNI 那一套到不了
-//!                  system_server 之外的进程，也没必要到。
+//!   本文件      —— 数据面：只导出 `wc_engine_ping` / `wc_engine_version` 两个哨兵，
+//!                  由 Zygisk 里的 C++ shim 静态链接后调用，用来证明「这份 .so 是我们编的」。
+//!                  理由见《LSP模块2026开发规范》L2 与 L16：native 只由 Zygisk 加载，
+//!                  且**业务判定不得放 native**——判定已经在 Kotlin 侧实现。
 //!
-//! 为什么判定放在这里而不是 Kotlin
-//!   规则是「某个 uid 的某类数据要给空还是给真」——这是引擎知识，Kotlin 只负责把
-//!   规则喂进来（remote preferences → 这里），以及把结果画成灯。P0 先把这条链路打通。
+//! 下面为什么还留着规则表和 decide
+//!   它们在 2026-11-22 从导出面撤回（`export fn` → `pub fn`），不再进 shim 的符号表、
+//!   也不参与任何热路径。留着的原因是：这 6 个 test 就是**判定语义的规格**——
+//!   「同一 uid 多条规则取并集」「拒绝挂到系统 uid」「未知 kind 走放行」这几条，
+//!   Kotlin 侧必须逐条对上。改语义的正确顺序是：先改这里的 test，再改 Kotlin 实现。
 //!
 //! 硬约束（规范 L7）
 //!   - 无静态初始化副作用：下面只有一张 .bss 表，没有 comptime 里跑 IO、没有 constructor。
 //!   - 不碰资源系统、不开文件、不弹窗、不 fork。
 //!   - 不链 libc：只用 Zig 自带的内存操作，编译成静态库后由 shim 链接。
-//!   - 单次调用不分配内存（表是定长数组），因此在 system_server 里调用不会触发 GC/JNI 抖动。
+//!   - 单次调用不分配内存（表是定长数组）。
 //!
 //! 当前语义（故意做得极小，可单测）
 //!   rule_set(slot, uid, kind_mask)  —— 往表里写一条规则；slot 越界/重复 uid 覆盖写
@@ -62,6 +64,11 @@ fn kindBit(kind: u8) u8 {
 
 // ---------------------------------------------------------------------------
 // 导出符号：朴素 C ABI，顺序、名字、类型都不能随便动（shim 侧按名字链接）
+//
+// 2026-11-22 起（L16.2.1「业务不得放 native」）这里**只导出两个哨兵**。
+// 判定/规则表（rule_set / rule_clear / rule_count / decide）改成 `pub fn`：不导出、
+// 不进 shim 的符号表、不参与任何热路径，只作为**规格与单测**存在——Kotlin 侧的实现
+// 必须逐条对上下面那些 test，语义改动先改测试再改两边。
 // ---------------------------------------------------------------------------
 
 export fn wc_engine_version() callconv(.c) u32 {
@@ -74,7 +81,9 @@ export fn wc_engine_ping() callconv(.c) u32 {
 }
 
 /// 写一条规则。返回 0 成功，1 slot 越界，2 kind_mask 没有有效位，3 uid 非法（<10000 是系统 uid 段）
-export fn wc_engine_rule_set(slot: u32, app_uid: u32, kind_mask: u8) callconv(.c) u8 {
+///
+/// 不导出：见上面的说明。Kotlin 侧的 PolicyTable 要按本函数的语义对齐。
+pub fn wc_engine_rule_set(slot: u32, app_uid: u32, kind_mask: u8) callconv(.c) u8 {
     if (slot >= MAX_RULES) return 1;
     const mask = kind_mask & 0x07;
     if (mask == 0) return 2;
@@ -86,14 +95,14 @@ export fn wc_engine_rule_set(slot: u32, app_uid: u32, kind_mask: u8) callconv(.c
     return 0;
 }
 
-export fn wc_engine_rule_clear() callconv(.c) void {
+pub fn wc_engine_rule_clear() callconv(.c) void {
     for (&rules) |*r| {
         r.* = .{};
     }
 }
 
 /// 数一下当前有效规则条数，供审计/自检用（不做成「猜」，就是遍历，64 条开销可忽略）
-export fn wc_engine_rule_count() callconv(.c) u32 {
+pub fn wc_engine_rule_count() callconv(.c) u32 {
     var n: u32 = 0;
     for (rules) |r| {
         if ((r.mask & OCCUPIED) != 0) n += 1;
@@ -107,7 +116,7 @@ export fn wc_engine_rule_count() callconv(.c) u32 {
 ///   - 同一 uid 多条规则时取**并集**（后写的不会把先写的抹掉，避免配置下发顺序影响结果）；
 ///   - 未知 kind 返回 2，调用方按放行处理（fail-open，规范 L10）；
 ///   - 表空 → 全放行。
-export fn wc_engine_decide(app_uid: u32, kind: u32) callconv(.c) u8 {
+pub fn wc_engine_decide(app_uid: u32, kind: u32) callconv(.c) u8 {
     if (kind >= KIND_MAX) return DECIDE_BAD_KIND;
     const bit = kindBit(@intCast(kind));
     if (bit == 0) return DECIDE_BAD_KIND;

@@ -3,6 +3,7 @@ package com.luckyme.watchcat.xposed;
 import android.os.Process;
 import android.util.Log;
 
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.nio.charset.StandardCharsets;
 
@@ -10,6 +11,8 @@ import io.github.libxposed.api.XposedInterface;
 import io.github.libxposed.api.XposedModule;
 import io.github.libxposed.api.XposedModuleInterface.ModuleLoadedParam;
 import io.github.libxposed.api.XposedModuleInterface.SystemServerStartingParam;
+
+import com.luckyme.watchcat.BuildConfig;
 
 /**
  * P1 框架接入：只证明「模块被 Vector 加载、生命周期入口可观测」，不注册任何 hook。
@@ -74,6 +77,10 @@ public final class WatchCatModule extends XposedModule {
                 "classLoader=" + param.getClassLoader()
                         + "\napi=" + getApiVersion()
                         + "\nframework=" + getFrameworkName());
+
+        // L10.2：启动后 90 秒内必须有一次心跳。这里是最早的可靠时机，够用且不必起线程
+        // （hook 侧零常驻状态，起线程就要管生命周期，属于自找的复杂度）。
+        writeHeartbeat();
     }
 
     private boolean hasCap(long prop) {
@@ -88,14 +95,36 @@ public final class WatchCatModule extends XposedModule {
      * 两个都失败就静默放弃——这是诊断探针，不是功能。
      */
     private void writeMarker(String stage, String body) {
+        writeTo(stage, "watchcat." + stage + ".marker", stage + ".marker", body);
+    }
+
+    /**
+     * 心跳：L10.3 的「连续两次无心跳自动停用」靠它，root 侧 post-fs-data.sh 会在下一次开机时
+     * 拿这里写的 bootId 结算上一轮。所以 bootId 必须写对，不能省。
+     *
+     * 已知缺口：L10.2 要求「心跳 + 自检（引擎 ping）两项都成功才算这一轮活下来」，而自检那一半
+     * 在 Java 侧做不到——native 由 Zygisk 加载，Java 拿不到它的句柄。引擎是否活着单独由
+     * entry.cpp 的探针写 /data/system/watchcat.p0.probe 证明。所以这里的心跳只能证明
+     * 「框架回调执行了」，两项要合起来读。
+     */
+    private void writeHeartbeat() {
+        String body = "bootId=" + readBootId()
+                + "\nframework=" + getFrameworkName()
+                + "\nframeworkVersion=" + getFrameworkVersion()
+                + "\napi=" + getApiVersion();
+        writeTo("heartbeat", "watchcat.heartbeat", "heartbeat", body);
+    }
+
+    private void writeTo(String stage, String systemName, String stateName, String body) {
         final String content = "stage=" + stage
                 + "\n" + body
+                + "\napp=" + BuildConfig.VERSION_NAME + " (" + BuildConfig.VERSION_CODE + ")"
                 + "\npid=" + Process.myPid()
                 + "\ntimeMs=" + System.currentTimeMillis()
                 + "\n";
         for (String path : new String[]{
-                MARKER_DIR + "/watchcat." + stage + ".marker",
-                STATE_DIR + "/" + stage + ".marker",
+                MARKER_DIR + "/" + systemName,
+                STATE_DIR + "/" + stateName,
         }) {
             try (FileOutputStream out = new FileOutputStream(path, false)) {
                 out.write(content.getBytes(StandardCharsets.UTF_8));
@@ -104,5 +133,19 @@ public final class WatchCatModule extends XposedModule {
                 // 只尝试下一个落点，不记录、不重试。
             }
         }
+    }
+
+    /** 读本次开机的 boot_id。读不到就写 unknown——脚本那边匹配不上，会算一次失败，这是可接受的保守方向。 */
+    private static String readBootId() {
+        try (FileInputStream in = new FileInputStream("/proc/sys/kernel/random/boot_id")) {
+            byte[] buf = new byte[64];
+            int n = in.read(buf);
+            if (n > 0) {
+                return new String(buf, 0, n, StandardCharsets.UTF_8).trim();
+            }
+        } catch (Throwable ignored) {
+            // 落到下面的 unknown
+        }
+        return "unknown";
     }
 }

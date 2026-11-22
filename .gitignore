@@ -40,6 +40,9 @@ snapshot*.json
 Thumbs.db
 .DS_Store
 
+# 临时工作目录（排障时下载到这里的源码副本、临时脚本），随时可删
+/.agent_tmp/
+
 # native 产物不入库：CI 在组装 APK 之前用 tools/build_so.py 现编。
 # 曾经把 .so 入库过，结果 CI 每次重编都会把工作区改成 dirty，模块包名恒为 -dirty，
 # “靠包名认 commit”直接失效；现在由 workflow 里的「溯源门禁」保证它不会被重新入库。

@@ -22,7 +22,16 @@ done
   echo "boot_completed=$(getprop sys.boot_completed 2>/dev/null)"
   echo "uptime=$(cut -d' ' -f1 /proc/uptime 2>/dev/null)"
   echo "armed=$([ -f "$WC/armed" ] && echo yes || echo no)"
+  echo "fail=$(cat "$WC/fail.count" 2>/dev/null)"
 } > "$WC/service.marker" 2>/dev/null
 chmod 600 "$WC/service.marker" 2>/dev/null
+
+# 心跳是 L10.2 的判据：由 system_server 里的模块在 onSystemServerStarting 时写，
+# 落 /data/system（/data/adb 它写不进来）。这里只做「有没有」的旁证，不参与判定。
+if [ -f /data/system/watchcat.heartbeat ]; then
+  echo "heartbeat=yes" >> "$WC/service.marker" 2>/dev/null
+else
+  echo "heartbeat=no" >> "$WC/service.marker" 2>/dev/null
+fi
 
 exit 0
