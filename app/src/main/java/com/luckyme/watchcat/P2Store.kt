@@ -34,11 +34,11 @@ object P2Store {
         FrameworkState.service()?.getRemotePreferences(GROUP) != null
     }.getOrDefault(false)
 
-    /** 页面里一条目标策略。默认 = 未启用、黑名单、ROM 层开（ROM 是这个功能的"送分项"）。 */
+    /** 页面里一条目标策略。默认 = 未启用、**只看基础（白名单 = 基础可见集）**、ROM 层开。 */
     data class Target(
         val pkg: String,
         val armed: Boolean = false,
-        val mode: PkgPolicy.Mode = PkgPolicy.Mode.HIDE,
+        val mode: PkgPolicy.Mode = PkgPolicy.Mode.SHOW,
         val hide: Set<String> = emptySet(),
         val show: Set<String> = emptySet(),
         val rom: Boolean = true,
@@ -92,22 +92,37 @@ object P2Store {
         if (!isRemote()) {
             return "框架未连接：远程 prefs 不可用，策略没有下发（先确认 Vector 在运行、模块已启用）"
         }
-        if (t.armed && t.hide.isEmpty() && t.show.isEmpty() && !t.rom) {
+        // 白名单模式不许空：`show` 空了就是 fail-open（全可见），等于把「只看基础」悄悄变成「全放行」。
+        // 这里直接补基础可见集，并在结果里明说补了多少，不猜用户意图。
+        var target = t
+        var filled = 0
+        if (t.mode == PkgPolicy.Mode.SHOW && t.show.isEmpty()) {
+            val base = BaseSet.collect(ctx.packageManager, currentImeId(ctx))
+            target = t.copy(show = base)
+            filled = base.size
+        }
+        if (target.armed && target.hide.isEmpty() && target.show.isEmpty() && !target.rom) {
             return "没有可藏的对象：名单为空且 ROM 层关闭，保存了也不会生效"
         }
-        if (t.mode == PkgPolicy.Mode.SHOW && t.armed && t.show.isEmpty()) {
-            return "白名单为空：钩子会判成「不隐藏」，请至少选一个要放行的应用"
-        }
         val boot = bootId()
-        val body = text(t, boot)
-        val p = prefs(ctx).edit().putString(keyOf(t.pkg), body)
+        val body = text(target, boot)
+        val p = prefs(ctx).edit().putString(keyOf(target.pkg), body)
         if (!p.commit()) return "写入失败：框架拒绝了这次 commit"
-        val back = runCatching { prefs(ctx).getString(keyOf(t.pkg), null) }.getOrNull()
+        val back = runCatching { prefs(ctx).getString(keyOf(target.pkg), null) }.getOrNull()
         if (back != body) return "写入后回读不符，已放弃（页面不显示为已启用）"
-        return "已保存：${t.pkg} · armed=${if (t.armed) "yes" else "no"} · " +
-            "mode=${if (t.mode == PkgPolicy.Mode.SHOW) "show" else "hide"} · " +
-            "hide=${t.hide.size} show=${t.show.size} rom=${if (t.rom) "yes" else "no"}"
+        val note = if (filled > 0) "（白名单为空，已自动填入基础可见集 $filled 个）" else ""
+        return "已保存：${target.pkg} · armed=${if (target.armed) "yes" else "no"} · " +
+            "mode=${if (target.mode == PkgPolicy.Mode.SHOW) "show" else "hide"} · " +
+            "hide=${target.hide.size} show=${target.show.size} " +
+            "rom=${if (target.rom) "yes" else "no"}$note"
     }
+
+    /** 当前默认输入法 id（形如 `pkg/.Service`），拿不到就 null。 */
+    fun currentImeId(ctx: Context): String? = runCatching {
+        android.provider.Settings.Secure.getString(
+            ctx.contentResolver, android.provider.Settings.Secure.DEFAULT_INPUT_METHOD,
+        )
+    }.getOrNull()
 
     fun remove(ctx: Context, pkg: String): String {
         prefs(ctx).edit().remove(keyOf(pkg)).commit()

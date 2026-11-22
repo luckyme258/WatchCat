@@ -65,12 +65,34 @@ object P2Device {
         val injected: Boolean get() = marker != null
     }
 
+    /** 补救回路的一条：目标应用问过这个包，但我们把它藏了（`nnf`=查不存在 / `iae`=不满足）。 */
+    data class Remedy(val pkg: String, val count: Int, val act: String)
+
+    /**
+     * 从事件文件里算出「它刚才想看谁」。
+     *
+     * 事件行的形状（钩子里写的）：`ts=… uid=… pid=… pkg=<目标> api=getPackageInfo target=<被查包> act=nnf module=…`。
+     * 只统计"被藏掉"的两种 act，`act=allow` 不算——那是本来就该看见的。
+     */
+    fun remedies(events: List<String>): List<Remedy> {
+        val hits = LinkedHashMap<String, Remedy>()
+        for (line in events) {
+            val m = Regex(" target=([^ ]+) act=([a-z]+)").find(line) ?: continue
+            val pkg = m.groupValues[1].trim()
+            val act = m.groupValues[2]
+            if (pkg.isEmpty() || (act != "nnf" && act != "iae")) continue
+            val old = hits[pkg]
+            hits[pkg] = Remedy(pkg, (old?.count ?: 0) + 1, act)
+        }
+        return hits.values.sortedByDescending { it.count }
+    }
+
     /** 读目标进程写下的 marker 与最近事件。文件是目标应用 `0600` 私有，必须 su；且必须走全局挂载 ns。 */
     fun injection(pkg: String): Injection {
         val dir = "/data/user/0/$pkg/files"
         val m = Shell.suMount("cat $dir/watchcat.p2.marker 2>/dev/null")
         val marker = if (m.ok && m.output.isNotBlank()) parseKv(m.output) else null
-        val e = Shell.suMount("tail -n 5 $dir/watchcat.p2.events.jsonl 2>/dev/null")
+        val e = Shell.suMount("tail -n 200 $dir/watchcat.p2.events.jsonl 2>/dev/null")
         val events = if (e.ok && e.output.isNotBlank()) e.output.lineSequence().filter { it.isNotBlank() }.toList() else emptyList()
         val err = when {
             !m.ok && m.output.isBlank() -> "读不到目标私有目录（su -M exit=${m.code}）：目标没启动过，或 root 没授权"

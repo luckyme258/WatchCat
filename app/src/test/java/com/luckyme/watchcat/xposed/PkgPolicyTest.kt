@@ -155,4 +155,33 @@ class PkgPolicyTest {
         val snap = p.parse("version=1\narmed=yes\nbootId=$boot\nmode=show\nrom=yes\nshow=org.lineageos.updater\n")
         assertFalse(p.isHidden("org.lineageos.updater", 1000, selfPkg, selfUid, snap))
     }
+
+    // ---- 「只看基础」：暴露集合语义（2026-11-22 新增，方案 3 的默认姿态）----
+
+    @Test
+    fun baseSetModeExposesOnlyListedThirdParty() {
+        val snap = p.parse(
+            "version=1\narmed=yes\nbootId=$boot\nmode=show\n" +
+                "show=com.android.settings,com.miui.home,com.google.android.inputmethod.latin\n",
+        )
+        // 基础集里的第三方（桌面/输入法）可见
+        assertFalse(p.isHidden("com.miui.home", 10200, selfPkg, selfUid, snap))
+        assertFalse(p.isHidden("com.google.android.inputmethod.latin", 10189, selfPkg, selfUid, snap))
+        // 集外第三方一律看不到
+        assertTrue(p.isHidden("com.tencent.mm", 10181, selfPkg, selfUid, snap))
+        assertTrue(p.isHidden("com.xunmeng.pinduoduo", 10201, selfPkg, selfUid, snap))
+        // 系统应用（uid<10000）本来就有自杀保护，写了没写都一样可见
+        assertFalse(p.isHidden("com.android.webview", 1000, selfPkg, selfUid, snap))
+        assertFalse(p.isHidden("com.google.android.gms", 1000, selfPkg, selfUid, snap))
+        // 调用者自己永远可见
+        assertFalse(p.isHidden(selfPkg, selfUid, selfPkg, selfUid, snap))
+    }
+
+    @Test
+    fun emptyShowSetStaysFailOpenAndNotEnabled() {
+        // show 为空 = fail-open（全可见）。App 侧必须补基础集，钩子侧不能"空集隐藏"，否则把依赖全藏崩应用
+        val snap = p.parse("version=1\narmed=yes\nbootId=$boot\nmode=show\nshow=\n")
+        assertFalse("空白名单不算启用，别给每个进程白挂 60+ 钩子", p.enabled(snap, boot))
+        assertFalse(p.isHidden("com.tencent.mm", 10181, selfPkg, selfUid, snap))
+    }
 }
