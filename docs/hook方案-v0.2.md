@@ -402,6 +402,23 @@ P0 的四条里 **① 与 ③ 已结项**：① 的结论是"Zig 只留哨兵"�
 **已关闭的开放项**：心跳与闸门文件落点已定 `/data/system`（`0600 system:system`，实测可写，L17）；
 `/data/misc` 未测，不再候选。
 
+### 13.1 A 阶段真机验收记录（2026-11-22，小米 13 / Vector 2.2 / NeoZygisk 2.4 / KernelSU 3.3.1）
+
+| 验的东西 | 手法 | 结果（原始证据） |
+|---|---|---|
+| 钩子装得上 | App 写闸门 + 策略，`stop; start` | `p3_clip_hook.marker`：`armed=yes`、`policy=ok`、`hooked=5`、`class=com.android.server.clipboard.ClipboardService$ClipboardImpl`、`declared=17`、`diag=-` |
+| 放行路径 | 弹一次输入法 | `uid=10189 pkg=com.google.android.inputmethod.latin m=CLIP mode=ALLOW`（`DESC` 同） |
+| 默认空路径 | 起一次淘宝 / 抖音 | `uid=10181 pkg=com.taobao.taobao m=HAS mode=EMPTY`、`uid=10179 pkg=com.ss.android.ugc.aweme m=HAS mode=EMPTY` |
+| 策略现读（不重载） | 同一进程内把 `default=empty` 改成 `default=allow`，再起淘宝 | 紧接着的审计变成 `m=HAS/CLIP mode=ALLOW`，**没有重启框架** |
+| 停用即时生效 | `rm` 策略文件后起淘宝 | 审计行数不再增长（钩子在、读不到策略就放行，§8.3） |
+| App 按钮链路 | 真机点「停用」→「启用」 | 停用后 `armed`/`policy` 两个文件都不在；启用后按 `ClipGate` 的格式重建：`default=empty`、`imeuid=10189`、`allow=10199`（把自己的 uid 列白，保证 App 自己粘贴不受影响）、`bootId=` 为当前 boot_id、`0600 system:system` |
+| 诊断页 | 打开「数据面 · 剪贴板」卡片 | 读数与 marker 一致：「闸门：已启用（bootId 匹配）」「钩子：armed=yes · policy=ok · hooked=5 · methods=…」「失败计数：0 · 自动停用：未触发」「审计：N 条」 |
+
+**踩到的两个坑**（已写成规范）：
+
+1. 钩点类名猜错 → `hooked=0` 且无任何报错。五个读方法在**内层** `ClipboardService$ClipboardImpl`，外层 `ClipboardService` 一个都没有（见 §4.1）。现在 marker 用 `noclass` / `miss` / `fail` 把三种失败分开落盘。
+2. `stop` 与 `start` 拆成两条执行会黑屏失联（L18.6）。必须一条命令连写，一次开机窗口只做一次。
+
 ---
 
 # 附录 A · 预置数据（首版）
