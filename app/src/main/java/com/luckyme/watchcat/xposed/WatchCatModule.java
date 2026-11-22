@@ -35,12 +35,36 @@ public final class WatchCatModule extends XposedModule {
         }
     }
 
+    /**
+     * 不带任何日志的落盘探针：只写文件，不依赖 logcat、也不依赖框架的 log()。
+     * 用来回答「这段代码到底有没有被执行」。写在 /data/system 是因为同机
+     * ClipBox 已在 system_server 里成功写 /data/system/clipbox_config.json。
+     */
+    private static void probe(String stage) {
+        String body = "stage=" + stage
+                + "\npid=" + Process.myPid()
+                + "\ntimeMs=" + System.currentTimeMillis()
+                + "\n";
+        for (String path : new String[]{
+                "/data/system/watchcat." + stage + ".marker",
+                STATE_DIR + "/" + stage + ".marker",
+        }) {
+            try (FileOutputStream out = new FileOutputStream(path, false)) {
+                out.write(body.getBytes(StandardCharsets.UTF_8));
+                return;
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
     public WatchCatModule() {
+        probe("ctor");
         raw("ctor");
     }
 
     @Override
     public void onModuleLoaded(ModuleLoadedParam param) {
+        probe("moduleLoaded");
         raw("onModuleLoaded");
         try {
             final boolean system = param.isSystemServer();
@@ -60,6 +84,7 @@ public final class WatchCatModule extends XposedModule {
 
     @Override
     public void onSystemServerStarting(SystemServerStartingParam param) {
+        probe("systemServerStarting");
         raw("onSystemServerStarting");
         try {
             log(Log.INFO, TAG, "p1: onSystemServerStarting pid=" + Process.myPid()
