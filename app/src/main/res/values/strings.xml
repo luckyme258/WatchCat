@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- android:description 只收引用、不收字面量（aapt2 会报 "incompatible with attribute
+     description (attr) reference"），所以这行必须走字符串资源。Vector 管理器列表里的
+     模块描述读的就是它（《LSP模块2026开发规范》L13 / 兼容性核对 3.1-8）。 -->
+<resources>
+    <string name="app_description">系统级剪贴板与权限审计工具：权限面可直接使用，数据面需装配套模块并手动启用，默认不改变任何行为。</string>
+</resources>
