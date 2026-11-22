@@ -193,14 +193,18 @@ zig/  同一份源码，两个编译目标
 
 ### 5.2 必须同时覆盖的四个面
 
-| 面 | 目标方法 | 处理 |
-|---|---|---|
-| 列表 | `getInstalledPackages`、`getInstalledApplications` | 从结果里剔除被隐藏项 |
-| 单点 | `getPackageInfo`、`getApplicationInfo` | **抛 `NameNotFoundException`**（不返回 null，null 不合法） |
-| Intent | `queryIntentActivities`、`queryIntentServices`、`queryIntentProviders`、`queryIntentReceivers`、`resolveActivity`、`resolveService`（含 13+ 的 `ResolveInfoFlags` 重载） | 剔除结果；`resolve*` 返回 null |
-| 跨 uid | `getPackagesForUid`、`getNamesForUids` | 剔除 |
+> **2026-11-22 已按 Android 17 真机 dex 重核（详见 `docs/应用列表-API核对.md`）**：下表的名字已改成实际存在的 API 名；每个名字都带多套重载（`int flags` 与 `*Flags` 对象），钩法改为"按方法名族钩 + 运行时枚举声明方法"，不再写死签名。
 
-二期再谈：`ActivityManager.getRunningAppProcesses`、`UsageStatsManager`、`LauncherApps`、无障碍窗口包名。这些偏"行为"而非"清单"，漏了不容易被抓，但终归要补。
+| 面 | 目标方法（族） | 处理 |
+|---|---|---|
+| 列表 | `getInstalledPackages`(+AsUser)、`getInstalledApplications`(+AsUser) | 从结果里剔除被隐藏项（空列表不返回 null） |
+| 单点 | `getPackageInfo`(+AsUser, 含 `VersionedPackage`)、`getApplicationInfo`(+AsUser)、`getPackageUid`(+AsUser)、`getApplicationEnabledSetting`、`getComponentEnabledSetting`、`getInstallerPackageName`、`getLaunchIntentForPackage`/`getLeanbackLaunchIntentForPackage`/`getLaunchIntentSenderForPackage`、`getSharedLibraries`(+AsUser)、`getPreferredActivities` | 查到就**抛 `NameNotFoundException`**（不返回 null，null 不合法）；单值型返回 `null`；两个输出列表型要同时剔除 |
+| Intent/组件 | `queryIntentActivities`、`queryIntentServices`、`queryIntentContentProviders`、`queryBroadcastReceivers`、`queryIntentActivityOptions`（均含 AsUser）、`queryContentProviders`、`resolveActivity`、`resolveService`、`resolveContentProvider`（均含 AsUser） | 剔除结果；`resolve*` 返回 null |
+| 跨 uid | `getPackagesForUid`、`getNamesForUids` | 剔除（`getNamesForUids` 按位置置 null；同 uid 全隐才隐） |
+
+**原表两处已作废**：`queryIntentProviders` 在 Android 17 上不存在（应为 `queryIntentContentProviders`/`queryContentProviders`/`resolveContentProvider`）；`queryIntentReceivers` 应用侧不存在（应为 `queryBroadcastReceivers`，`queryIntentReceivers` 只在 `IPackageManager` 系）。
+
+二期再谈：`ActivityManager.getRunningAppProcesses`、`UsageStatsManager`、`LauncherApps`、无障碍窗口包名、`Runtime.exec("pm …")`（同 uid 另起进程，可能绕过 hook，优先级最高）。这些偏"行为"而非"清单"，漏了不容易被抓，但终归要补。`pm list packages` / `dumpsys package` 跑在 shell/system 进程，**应用内注入永远管不到**，属设计事实。
 
 ### 5.3 自洽原则（写进规范的那条，在这里具化）
 
@@ -382,6 +386,9 @@ P0 的四条里 **① 与 ③ 已结项**：① 的结论是"Zig 只留哨兵"�
 5. **闸门与策略落 `/data/system`**（2026-11-22 实测）：root 能在该目录建文件（`0644 root:root`、label `system_data_file`），system_server（uid 1000）能读；App 经 `su` 写、system_server 读、诊断页再 `su` 读，三段各自可独立验证。`/data/adb/watchcat` 继续只放模块脚本自己的状态（0700 root:root）。
 6. **输入法 uid 由 App 侧算**（`Settings.Secure.DEFAULT_INPUT_METHOD` → `getPackageUid`，包可见性兜底走 `dumpsys`），写进策略的 `imeuid=`；hook 侧只用 `Binder.getCallingUid()`，不解析包名、不碰私有 API。
 7. **BLOCK 本期不上**：框架的 `PROTECTIVE` 异常模式会把钩子里抛出的异常吞掉并继续走原逻辑，要让阻断生效只能整钩改 `PASSTHROUGH`，那会把我们自己的 bug 也变成崩溃。策略里写 `block` 会被降级成 `empty`，并在审计行标 `downgrade=block`，不假装做到了。
+8. **应用列表按方法名族钩、签名运行时枚举**（2026-11-22 dex 核对）：`ApplicationPackageManager` 在 Android 17 上 363 个方法，同一语义普遍有 `int flags` 与 `*Flags` 两套重载；写死签名必漏。族名清单见 `docs/应用列表-API核对.md` §3。
+9. **`queryIntentProviders` / `queryIntentReceivers` 从方案里删掉**：前者在 framework.jar 0 命中，后者只在 `IPackageManager` 系；应用侧对应 `queryIntentContentProviders` / `queryContentProviders` / `resolveContentProvider` 与 `queryBroadcastReceivers`。
+10. **P2 证据通道待定**（`docs/应用列表-API核对.md` §8）：钩子在应用 uid，写不了 `/data/system`；候选是"目标私有目录落盘 + App 用 su 归集"或"显式广播"，定案后要补一条 L15 例外，未定之前不写代码。
 
 **已定（2026-11-21）**
 
