@@ -134,11 +134,15 @@ zig/  同一份源码，两个编译目标
 
 `ClipboardManager`（应用侧）→ binder → `com.android.server.clipboard.ClipboardService`（system_server）。**只钩 system_server 一侧**，一次注入覆盖全部应用，且每行都能取 `Binder.getCallingUid()`。
 
+**但真正声明读方法的类不是 `ClipboardService`，是它的内层实现体 `ClipboardService$ClipboardImpl`**（`IClipboard.Stub` 的实现，`onTransact` 分发后按虚调用落到它身上）。2026-11-22 首轮真机跑出 `hooked=0` 就是踩了这个：dex 里五个读方法的每一段都印着 `(in Lcom/android/server/clipboard/ClipboardService$ClipboardImpl;)`，外层类一个同名方法都没有。所以钩点按"内层优先、外层兜底"两级取，命中即止，不重复钩同一方法。
+
 ### 4.2 方法面（按"族"钩，不按签名钩）
 
 **关键工程决定：按方法名枚举"同名重载"，不在代码里写死签名。** 具体 API 形态按 libxposed 101：用 interceptor（不是 legacy 的 `XC_MethodHook`），入口用 `onSystemServerStarting`（不是 `handleLoadPackage`，也**不许靠进程名猜**——v2.1 就踩过"模块加载了但 `system_server` 里 `findClass` 全挂"的坑）。
 
 原因：API 29→36 之间这几个方法的参数形态改过（多了 `pkg`、`attributionTag`、`userId`、`deviceId` 等），写死签名等于给自己埋一个"到某代系统就静默失效"的雷。回调里靠 `Binder.getCallingUid()` 判定，参数只用于取包名做审计。
+
+**同理，钩点类名也不能按"看起来该是哪个类"去猜**：钩错类不会报错，只会静静拿到 `hooked=0`。所以探针必须把"没加载到类 / 名字没匹配 / 被框架拒绝"三种失败分开落盘（`diag` 里的 `noclass` / `miss` / `fail`），否则下次还是只有一个 `0`。
 
 要覆盖的方法族（**具体重载在 P0 打点打印实测，不猜**）：
 
@@ -325,7 +329,7 @@ Magisk/KernelSU 的具体版本门槛来自第三方指南、作者 README 只�
 | **B 应用列表** | 四面覆盖 + 自洽 + 名单编辑/导入导出 | 可用的列表伪造 | 2–4 天 |
 | **C 打磨** | 分池词库、简版审计页、自动停用 UI、诊断页接入 | 收尾 | 1–2 天 |
 
-P0 的四条里 **① 与 ③ 已结项**：① 的结论是"Zig 只留哨兵"（L16），③ 的结论是"心跳与闸门落 `/data/system`"（L17）。**② 已结项（2026-11-22）**：不再打点，直接拉真机 `services.jar` 用 `dexdump` 读声明，`ClipboardService` 的读方向重载全部是 `(String pkg, String attributionTag, int userId, int deviceId)` 四参形态，`hasPrimaryClip` / `hasClipboardText` 返回 `boolean`；对应实现在 `xposed/ClipboardHook.kt`。**④ 作用域与热生效** 仍按"每次开机重新确认 + `stop/start` 重载"处理，不单独开一轮。
+P0 的四条里 **① 与 ③ 已结项**：① 的结论是"Zig 只留哨兵"（L16），③ 的结论是"心跳与闸门落 `/data/system`"（L17）。**② 已结项（2026-11-22）**：不再打点，直接拉真机 `services.jar` 用 `dexdump` 读声明，`ClipboardService` 的读方向重载全部是 `(String pkg, String attributionTag, int userId, int deviceId)` 四参形态，`hasPrimaryClip` / `hasClipboardText` 返回 `boolean`；对应实现在 `xposed/ClipboardHook.kt`。**首轮真机修正（同日）**：这些声明实际落在内层 `ClipboardService$ClipboardImpl`，钩外层类只会得到 `hooked=0`——钩点已改为内层优先、外层兜底。**④ 作用域与热生效** 仍按"每次开机重新确认 + `stop/start` 重载"处理，不单独开一轮。
 
 每阶段都走 CI 出包、真机装、靶子验，**不在本机出包**（G0.0）。
 
