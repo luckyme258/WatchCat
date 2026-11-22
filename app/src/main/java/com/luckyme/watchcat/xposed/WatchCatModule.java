@@ -10,6 +10,7 @@ import java.nio.charset.StandardCharsets;
 import io.github.libxposed.api.XposedInterface;
 import io.github.libxposed.api.XposedModule;
 import io.github.libxposed.api.XposedModuleInterface.ModuleLoadedParam;
+import io.github.libxposed.api.XposedModuleInterface.PackageLoadedParam;
 import io.github.libxposed.api.XposedModuleInterface.SystemServerStartingParam;
 
 import com.luckyme.watchcat.BuildConfig;
@@ -62,6 +63,27 @@ public final class WatchCatModule extends XposedModule {
                         + "\nframeworkVersion=" + getFrameworkVersion()
                         + "\nframeworkVersionCode=" + getFrameworkVersionCode()
                         + "\napi=" + getApiVersion());
+    }
+
+    /**
+     * P2：应用列表钩子，装在**被管应用进程**里（不是 system_server）。
+     *
+     * 这里有三个与 system_server 侧不同的约束：
+     *   1. 进程是应用 uid，写不了 /data/system，证据只能落该应用私有目录（L15.2）；
+     *   2. 门禁也读不了 /data/system/watchcat.armed，改由 remote preferences / 私有目录策略判断；
+     *   3. 每次包加载都会回调，`PkgHook` 内部做了"一进程只装一次"，重复回调不会重复挂钩。
+     *
+     * 注入与否还取决于 Vector 的应用作用域：scope.list 目前只有 `system`，
+     * 目标应用必须在管理器里加入作用域才会被注入——这是框架侧的选择，不是模块能决定的。
+     */
+    @Override
+    public void onPackageLoaded(PackageLoadedParam param) {
+        try {
+            PkgHook.install(this, param.getPackageName(), param.getApplicationInfo(),
+                    param.getDefaultClassLoader());
+        } catch (Throwable t) {
+            log(Log.ERROR, TAG, "p2: package hook install failed", t);
+        }
     }
 
     @Override
