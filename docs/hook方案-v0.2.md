@@ -256,6 +256,87 @@ Android 11 起 `<queries>` 让"应用只能看到一部分应用"成为常态，
 **已配置 ≠ 已生效（真机事故，2026-11-22）**：用户在应用宝上勾了抖音、快手极速版，更新列表照旧显示它们。回读 marker 是 `armed=no / policy=disarmed / hooked=0`——名单存在但入口短路。打开「启用」并冷启动后：`armed=yes / policy=ok / hooked=70`，事件里 `getPackageInfoAsUser target=com.ss.android.ugc.aweme act=nnf` 连出，更新页只剩淘宝/必应/微博。结论：**不是 ROM 漏洞，也不是应用宝绕过了 PackageManager，是没启用**。产品侧因此做两件事：把生效状态搬到列表行上（0.5.8），并干脆删掉 armed 开关、让姿态即启用（0.5.9，决策 20）——只要还留着两个控件表达"启用"，这种事故就会无限复现。
 - **已知缺口**：跨目标汇总已上列表（0.5.9）；仍未闭环的是「单次读取授权（`grant.<target>`，uses=1）」与「含系统应用 1200+ 项渲染性能」（要上 RecyclerView，属重构）。
 
+### 5.7 名单写入校验流：按系统标记逐个判定（2026-11-28，0.6.0 草案）
+
+**前提**（决策 21）：P2 从"每目标一份三态策略"收敛为"模块一份隐藏名单"。名单是黑名单（只藏点名项），默认全可见——因此"防变砖"不能指望用户不点错，只能靠**写入时逐包否决** + **运行时 keep 兜底**这两道独立的闸。
+
+**判据一律取 Android 自己的标记，不自建角色清单：**
+
+| 判据 | 来源 | 结论 |
+|---|---|---|
+| `uid < 10000` | `Process.FIRST_APPLICATION_UID` | **拒绝**（系统骨架；Settings / systemui / 安装器 / 权限控制器都在 1000 段） |
+| 当前桌面 | `RoleManager.ROLE_HOME` | **拒绝** |
+| 当前输入法 | `Settings.Secure.DEFAULT_INPUT_METHOD` | **拒绝** |
+| 当前 WebView | `WebViewUpdateService` 的当前实现 | **拒绝** |
+| `FLAG_SYSTEM` | `ApplicationInfo.flags` | 不拒绝，只打「系统」角标 |
+| `FLAG_UPDATED_SYSTEM_APP` | `ApplicationInfo.flags` | 不拒绝，打「可更新」标签 |
+
+`FLAG_SYSTEM` 只能提示、不能拒绝的原因：Android 没有"系统骨架 vs 普通预装"这条界线，`com.android.settings` 与厂商商城同为 `FLAG_SYSTEM`。能分开它们的只有 **uid 段**和 **role**——前者藏了自锁，后者藏了正是用户想要的（小米商城、系统浏览器、预装 YouTube）。所以分工是：**uid + role 负责"不许藏"，FLAG_SYSTEM 负责"告诉用户这是系统应用"**。
+
+**写入侧（加名单时逐包）**
+
+```mermaid
+flowchart TD
+    A[用户勾选的候选包] --> B["for each pkg"]
+    B --> C["getPackageInfo: uid + flags"]
+    C --> D{读取失败?}
+    D -->|是| X1[拒绝·无法读取]
+    D -->|否| E{pkg 是自身或 android?}
+    E -->|是| X2[拒绝·自身]
+    E -->|否| F{uid &lt; 10000?}
+    F -->|是| X3[拒绝·系统骨架]
+    F -->|否| G{命中当前 role?<br/>桌面 / 默认输入法 / WebView}
+    G -->|是| X4[拒绝·当前默认，不可藏]
+    G -->|否| H{FLAG_SYSTEM?}
+    H -->|是| I[打「系统」角标 · 接受]
+    H -->|否| J[接受]
+    I --> K[并入 hide]
+    J --> K
+    X1 --> R[拒绝集·底部文案提示]
+    X2 --> R
+    X3 --> R
+    X4 --> R
+    K --> L["写策略文本: hide / keep(≤3) / bootId"]
+    L --> M{keep 含 1 桌面 + 1 输入法?}
+    M -->|否| N[整份不启用·fail-open]
+    M -->|是| O[enabled = true]
+```
+
+文字版（客户端不渲染上面的图时按此读）：读取 PackageInfo → 读取失败则拒绝 → 自身/android 拒绝 → `uid<10000` 拒绝 → 命中桌面/默认输入法/WebView 拒绝 → 其余接受（若 `FLAG_SYSTEM` 只加角标）→ 并入 hide → 写入策略文本 → 最后检查 keep 是否含桌面与输入法，缺则整份不启用。
+
+**运行时（判定层，纯 JVM 可测，顺序即语义）**
+
+```
+0. selfUid < 10000                          → 放行（读取方闸：系统进程整份不判定）
+1. null / 空 / android                      → 放行
+2. selfPkg                                  → 放行
+3. keep 命中（桌面/输入法/WebView）          → 放行
+4. rom=yes 且命中 ROM 特征                  → 隐藏
+5. pkgUid == selfUid 或 pkgUid < 10000      → 放行
+6. hide 命中                                → 隐藏
+```
+
+两条顺序约束，弄反任何一条都会出事故：
+
+- **keep 必须排在 rom 层之前**。keep 里只有桌面/输入法/WebView，永远不会是 ROM 特征包，两者不冲突；但如果 keep 排在 rom 之后，`rom=yes` 时若把某个 ROM 特征包误设成当前桌面，就会被 rom 层吃掉。
+- **rom 层必须排在 `uid<10000` 之前**。ROM 层要挡的 `lineageos.platform` 本身就是 uid 1000 的 framework 包，排到 uid 保护后面这一层就永远不生效。这也是当初把 rom 层写成特例的原因。
+
+**两道闸为什么都要留**：写入侧否决让用户"根本加不进去"（勾选框置灰）；运行时 keep 防的是**旧文本、迁移残留、手改文本**把系统包塞进 hide——这是第二道，不是冗余。
+
+**keep 的生成与刷新**
+
+- `keep` = 三个单例（当前桌面 / 当前默认输入法 / 当前 WebView），最多 3 条，文本极短
+- 探测时机：保存名单时、**每次打开名单页时**、迁移时；与文本里的 keep 比对不一致就静默写回（用户换默认输入法后无需任何操作）
+- 性能纪律：**只对名单候选做 `getPackageInfo`**（几十个，毫秒级），绝不全量扫 1200 个应用；批量页的系统分组用一次 `getInstalledApplications(MATCH_SYSTEM_ONLY)` 缓存，它只用于分组与角标，不参与否决
+
+**完整性闸（fail-open）**：`keep` 缺桌面或缺输入法 → 整份策略 `enabled=false`。宁可整份不生效，也不带一份算漏的 keep 去藏东西。WebView 可为空（个别机型没有独立 WebView 包）。
+
+**明确边界（写进文档，别当 bug 报）**
+
+- 藏不了"当前默认"的桌面 / 输入法 / WebView —— 刻意的，不是遗漏
+- `FLAG_SYSTEM` 应用在 UI 只是提示，用户确实可以把自己不喜欢的系统应用藏掉；藏错的后果是"某些应用看不到它"，不会变砖
+- 平台签名判据**不采用**：它分不开小米商城与 Settings，还要读证书算摘要，收益不如 uid 直接
+
 ---
 
 ## 6. 策略下发与保密（按 Vector 2.2 的真实机制改写）
@@ -428,6 +509,7 @@ P0 的四条里 **① 与 ③ 已结项**：① 的结论是"Zig 只留哨兵"�
 18. **`requestScope` 必须有超时兜底**（0.5.7，真机发现）：编辑器里的「加入作用域（root）」在 Vector 2.2 上点了没反应——`svc.requestScope()` 被接受但两个回调一个都没来，`cliAdd` 这条兜底因此轮不到，界面停在「不在作用域」。改法：主线程 `Handler` 挂 3s 超时，超时就走 `vector-cli scope add`，回调到达则撤掉超时；`AtomicBoolean` 保证 `done` 只回一次。文案写明走的哪条通道（"框架批准"/"框架未回执（3s 超时），已改走 CLI"）。
 19. **列表页三态 + 跨目标汇总**（0.5.8）：行尾状态从"已配置"改成真实生效态（`只看基础·传N`/`藏N+ROM`/`未启用·不判定`/`开机后失效`），点一下弹三态并立即下发；跨目标汇总用一次 `su -M` 批量读（`P2Device.eventsBatch`），只展示被 ≥2 个目标问过的包，「全部放行」逐目标改策略后回读。设计上不引 Material 库，间距/分组照 M3 范式自绘。
 20. **删掉 armed：姿态即启用**（0.5.9）：事故已证明"配置了但没启用"是两个控件表达同一件事的必然产物，因此 UI 上取消 `armed` 开关，`armed` 改由姿态推导——「只看基础」/「自定义」= armed=yes，「全部可见」= armed=no（钩子仍注入但不判定）。三态成为唯一入口：列表行点一下弹三选一，选完立即下发；「自定义」不再先写一份 `mode=HIDE + hide=空` 的空策略再被 `save()` 拒成"没有可藏的对象"，而是**直接进编辑器勾选**（`openEditorWithMode`）。配套三件：① 行内状态加瞬时档 `已下发 · 待冷启动`（`pendingRestart` 只活在本次会话，重开页面即丢，因为进程状态不能靠猜缓存）；② 列表顶部加"开机后失效"提醒带 + **一键续期**（`P2Store.renewBootId`，只重写 `bootId` 一行、保留名单与姿态，把 6 次手工保存压成 1 次点击）；③ 列表加搜索框，行区独立重绘（`renderRows`），搜索/切换姿态不再整页重建、不打断滚动。删除策略与跨目标全部放行都必须先确认。依据见规范 L19 / L20。
+21. **P2 收敛为单份隐藏名单，系统包保护改用 Android 标记**（0.6.0 草案，2026-11-28）：① 存储从"N 份 `policy.<pkg>`"收敛成"1 份 `hideList`"，`armed`/`mode`/`show` 全删，名单非空 + `bootId` 匹配即生效——**"配置了但没启用"从数据模型上消失**；② 目标维度不再由 App 维护，改由框架 `scope` 承担（名单生效范围 = scope 里的具体包），App 侧只在"加入名单/开启"时自动触发 scope 加入；③ 防变砖改用 Android 自己的标记：`uid<10000`、`RoleManager.ROLE_HOME`、`DEFAULT_INPUT_METHOD`、当前 WebView 四项**写入时否决 + 运行时 keep 兜底**（两道独立闸，见 §5.7）；`FLAG_SYSTEM` / `FLAG_UPDATED_SYSTEM_APP` 只做 UI 角标、不否决，因为 Android 没有"系统骨架 vs 普通预装"的界线，厂商商城与 Settings 同为 `FLAG_SYSTEM`，只能用 uid 与 role 分开；④ 完整性闸：`keep` 缺桌面或输入法即整份 `enabled=false`（fail-open）。依据是 0.5.5–0.5.9 的事故链（armed 双控件、`mode=hide` 残留 `show=` 死数据、白名单空集崩）+ 两条实测（Gboard uid 10189、第三方桌面 uid>10000 都躲得过 `uid<10000` 保护）。
 
 **已定（2026-11-21）**
 

@@ -184,4 +184,87 @@ class PkgPolicyTest {
         assertFalse("空白名单不算启用，别给每个进程白挂 60+ 钩子", p.enabled(snap, boot))
         assertFalse(p.isHidden("com.tencent.mm", 10181, selfPkg, selfUid, snap))
     }
+
+    // ---- 0.6.0：读取方闸 + 保护集（keep）+ 完整性闸 --------------------------------
+
+    private fun keep(
+        hideNames: List<String>,
+        home: String?,
+        ime: String?,
+        web: String? = null,
+    ) = p.parse(
+        buildString {
+            append("version=1\n")
+            append("armed=yes\n")
+            append("bootId=").append(boot).append('\n')
+            append("mode=hide\n")
+            append("hide=").append(hideNames.joinToString(",")).append('\n')
+            append("rom=yes\n")
+            home?.let { append("keep.home=").append(it).append('\n') }
+            ime?.let { append("keep.ime=").append(it).append('\n') }
+            web?.let { append("keep.web=").append(it).append('\n') }
+        }
+    )
+
+    @Test
+    fun systemReaderNeverJudges() {
+        val snap = keep(listOf("com.tencent.mm"), "com.miui.home", "com.google.android.inputmethod.latin")
+        assertFalse(
+            "注入进系统进程（selfUid<10000）时不能判定，否则藏任何包都会波及整个系统",
+            p.isHidden("com.tencent.mm", 10181, selfPkg, 1000, snap),
+        )
+    }
+
+    @Test
+    fun currentHomeAndImeAreKept() {
+        val snap = keep(
+            listOf("com.miui.home", "com.google.android.inputmethod.latin", "com.tencent.mm"),
+            "com.miui.home",
+            "com.google.android.inputmethod.latin",
+        )
+        assertFalse("藏掉当前桌面 = 没桌面", p.isHidden("com.miui.home", 10002, selfPkg, selfUid, snap))
+        assertFalse(
+            "藏掉唯一输入法 = 没键盘（Gboard 是 uid 10189，uid<10000 那层挡不住）",
+            p.isHidden("com.google.android.inputmethod.latin", 10189, selfPkg, selfUid, snap),
+        )
+        assertTrue(p.isHidden("com.tencent.mm", 10181, selfPkg, selfUid, snap))
+    }
+
+    @Test
+    fun keepWinsOverRomLayer() {
+        val snap = keep(
+            listOf("org.lineageos.updater"),
+            "com.miui.home",
+            "com.google.android.inputmethod.latin",
+            "org.lineageos.updater",
+        )
+        assertFalse("保护集排在 rom 层之前", p.isHidden("org.lineageos.updater", 1000, selfPkg, selfUid, snap))
+        assertTrue("rom 层仍然要能挡住 uid 1000 的 framework 包", p.isHidden("lineageos.platform", 1000, selfPkg, selfUid, snap))
+    }
+
+    @Test
+    fun incompleteKeepIsNotEnabled() {
+        val snap = keep(listOf("com.tencent.mm"), "com.miui.home", null)
+        assertFalse("缺当前输入法就整份不启用（fail-open），宁可什么都不藏", p.enabled(snap, boot))
+    }
+
+    @Test
+    fun legacyTextWithoutKeepStillWorks() {
+        val snap = hide("com.tencent.mm") // 旧格式：没有任何 keep.* 键
+        assertTrue("升级不能把旧配置直接判死", p.enabled(snap, boot))
+    }
+
+    @Test
+    fun preinstalledNonSkeletonCanStillBeHidden() {
+        val snap = keep(
+            listOf("com.miui.systemAdSolution", "com.android.chrome"),
+            "com.miui.home",
+            "com.google.android.inputmethod.latin",
+        )
+        assertTrue(
+            "FLAG_SYSTEM 只提示不否决：厂商商城、预装浏览器应当能藏",
+            p.isHidden("com.miui.systemAdSolution", 10500, selfPkg, selfUid, snap),
+        )
+        assertTrue(p.isHidden("com.android.chrome", 10210, selfPkg, selfUid, snap))
+    }
 }
