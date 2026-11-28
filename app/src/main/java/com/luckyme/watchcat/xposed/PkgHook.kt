@@ -56,6 +56,12 @@ object PkgHook {
     private const val F_EVENTS = "watchcat.p2.events.jsonl"
     private const val F_POLICY = "watchcat.p2.policy"
 
+    /**
+     * 0.6.0 的单份隐藏名单：所有被注入目标共用一份。
+     * 读不到时按 per-target 的 `policy.<目标包>` 兜底，保证"新钩子 + 旧配置"不会断档。
+     */
+    private const val KEY_LIST = "hideList"
+
     private const val MAX_EVENT_BYTES = 96L * 1024L
     private const val KEEP_EVENT_LINES = 200
 
@@ -201,6 +207,9 @@ object PkgHook {
                 append("\nrom=").append(if (snap.rom) "yes" else "no")
                 append("\nhide=").append(snap.hide.size)
                 append("\nshow=").append(snap.show.size)
+                append("\nkeep=").append(
+                    listOfNotNull(snap.keepHome, snap.keepIme, snap.keepWeb).joinToString(",").ifEmpty { "-" },
+                )
                 append("\nselfPkg=").append(ctx.selfPkg)
                 append("\nselfUid=").append(ctx.selfUid)
                 append("\nhooked=").append(hooked.size)
@@ -500,8 +509,10 @@ object PkgHook {
      * 策略来源：**remote preferences 优先**（正式通道，目标应用读不到框架托管的那份），
      * 回退到目标应用私有目录里的 `watchcat.p2.policy`（只给联调/真机验证用，root 用 su 写）。
      *
-     * 一个 group 里按目标应用存键：`policy.<目标包名>` 优先，其次兼容旧的单键 `policy`
-     * （旧单键语义是"所有目标共用一份"，只在没有按包键时兜底）。
+     * 读取顺序（0.6.0 起）：
+     *   1. 全局单键 `hideList` —— 一份名单作用于所有被注入目标；
+     *   2. 按目标键 `policy.<目标包名>` —— 0.5.x 的正式格式，迁移期内继续兜底；
+     *   3. 旧单键 `policy` —— 更早的"所有目标共用一份"，只在上面都读不到时兜底。
      *
      * 每次判定都会查一次：prefs 是内存 map（无 binder），file 走 mtime 比较，没变就不读盘。
      */
@@ -536,6 +547,8 @@ object PkgHook {
 
         private fun read(): String? {
             try {
+                val list = prefs?.getString(KEY_LIST, null)
+                if (!list.isNullOrBlank()) return list
                 val t = prefs?.getString(key, null)
                 if (!t.isNullOrBlank()) return t
                 val legacy = prefs?.getString("policy", null)

@@ -265,7 +265,7 @@ Android 11 起 `<queries>` 让"应用只能看到一部分应用"成为常态，
 | 判据 | 来源 | 结论 |
 |---|---|---|
 | `uid < 10000` | `Process.FIRST_APPLICATION_UID` | **拒绝**（系统骨架；Settings / systemui / 安装器 / 权限控制器都在 1000 段） |
-| 当前桌面 | `RoleManager.ROLE_HOME` | **拒绝** |
+| 当前桌面 | `ACTION_MAIN` + `CATEGORY_HOME` 的 `resolveActivity` | **拒绝** |
 | 当前输入法 | `Settings.Secure.DEFAULT_INPUT_METHOD` | **拒绝** |
 | 当前 WebView | `WebViewUpdateService` 的当前实现 | **拒绝** |
 | `FLAG_SYSTEM` | `ApplicationInfo.flags` | 不拒绝，只打「系统」角标 |
@@ -334,6 +334,7 @@ flowchart TD
 **明确边界（写进文档，别当 bug 报）**
 
 - 藏不了"当前默认"的桌面 / 输入法 / WebView —— 刻意的，不是遗漏
+- **不用 `RoleManager`**：它只有 `isRoleHeld(pkg)`（拿包名反查），没有"当前持有者是谁"的查询接口，拿不到正向答案；`resolveActivity(HOME)` 才是系统判定入口
 - `FLAG_SYSTEM` 应用在 UI 只是提示，用户确实可以把自己不喜欢的系统应用藏掉；藏错的后果是"某些应用看不到它"，不会变砖
 - 平台签名判据**不采用**：它分不开小米商城与 Settings，还要读证书算摘要，收益不如 uid 直接
 
@@ -509,7 +510,7 @@ P0 的四条里 **① 与 ③ 已结项**：① 的结论是"Zig 只留哨兵"�
 18. **`requestScope` 必须有超时兜底**（0.5.7，真机发现）：编辑器里的「加入作用域（root）」在 Vector 2.2 上点了没反应——`svc.requestScope()` 被接受但两个回调一个都没来，`cliAdd` 这条兜底因此轮不到，界面停在「不在作用域」。改法：主线程 `Handler` 挂 3s 超时，超时就走 `vector-cli scope add`，回调到达则撤掉超时；`AtomicBoolean` 保证 `done` 只回一次。文案写明走的哪条通道（"框架批准"/"框架未回执（3s 超时），已改走 CLI"）。
 19. **列表页三态 + 跨目标汇总**（0.5.8）：行尾状态从"已配置"改成真实生效态（`只看基础·传N`/`藏N+ROM`/`未启用·不判定`/`开机后失效`），点一下弹三态并立即下发；跨目标汇总用一次 `su -M` 批量读（`P2Device.eventsBatch`），只展示被 ≥2 个目标问过的包，「全部放行」逐目标改策略后回读。设计上不引 Material 库，间距/分组照 M3 范式自绘。
 20. **删掉 armed：姿态即启用**（0.5.9）：事故已证明"配置了但没启用"是两个控件表达同一件事的必然产物，因此 UI 上取消 `armed` 开关，`armed` 改由姿态推导——「只看基础」/「自定义」= armed=yes，「全部可见」= armed=no（钩子仍注入但不判定）。三态成为唯一入口：列表行点一下弹三选一，选完立即下发；「自定义」不再先写一份 `mode=HIDE + hide=空` 的空策略再被 `save()` 拒成"没有可藏的对象"，而是**直接进编辑器勾选**（`openEditorWithMode`）。配套三件：① 行内状态加瞬时档 `已下发 · 待冷启动`（`pendingRestart` 只活在本次会话，重开页面即丢，因为进程状态不能靠猜缓存）；② 列表顶部加"开机后失效"提醒带 + **一键续期**（`P2Store.renewBootId`，只重写 `bootId` 一行、保留名单与姿态，把 6 次手工保存压成 1 次点击）；③ 列表加搜索框，行区独立重绘（`renderRows`），搜索/切换姿态不再整页重建、不打断滚动。删除策略与跨目标全部放行都必须先确认。依据见规范 L19 / L20。
-21. **P2 收敛为单份隐藏名单，系统包保护改用 Android 标记**（0.6.0 定案，2026-11-28；四项已拍板：黑名单 / 目标维度交 scope / 当前默认三件不可藏 / rom 固定内建）：① 存储从"N 份 `policy.<pkg>`"收敛成"1 份 `hideList`"，`armed`/`mode`/`show` 全删，名单非空 + `bootId` 匹配即生效——**"配置了但没启用"从数据模型上消失**；② 目标维度不再由 App 维护，改由框架 `scope` 承担（名单生效范围 = scope 里的具体包），App 侧只在"加入名单/开启"时自动触发 scope 加入；③ 防变砖改用 Android 自己的标记：`uid<10000`、`RoleManager.ROLE_HOME`、`DEFAULT_INPUT_METHOD`、当前 WebView 四项**写入时否决 + 运行时 keep 兜底**（两道独立闸，见 §5.7）；`FLAG_SYSTEM` / `FLAG_UPDATED_SYSTEM_APP` 只做 UI 角标、不否决，因为 Android 没有"系统骨架 vs 普通预装"的界线，厂商商城与 Settings 同为 `FLAG_SYSTEM`，只能用 uid 与 role 分开；④ 完整性闸：`keep` 缺桌面或输入法即整份 `enabled=false`（fail-open）。依据是 0.5.5–0.5.9 的事故链（armed 双控件、`mode=hide` 残留 `show=` 死数据、白名单空集崩）+ 两条实测（Gboard uid 10189、第三方桌面 uid>10000 都躲得过 `uid<10000` 保护）。
+21. **P2 收敛为单份隐藏名单，系统包保护改用 Android 标记**（0.6.0 定案，2026-11-28；四项已拍板：黑名单 / 目标维度交 scope / 当前默认三件不可藏 / rom 固定内建）：① 存储从"N 份 `policy.<pkg>`"收敛成"1 份 `hideList`"，`armed`/`mode`/`show` 全删，名单非空 + `bootId` 匹配即生效——**"配置了但没启用"从数据模型上消失**；② 目标维度不再由 App 维护，改由框架 `scope` 承担（名单生效范围 = scope 里的具体包），App 侧只在"加入名单/开启"时自动触发 scope 加入；③ 防变砖改用 Android 自己的标记：`uid<10000`、`resolveActivity(HOME)`、`DEFAULT_INPUT_METHOD`、当前 WebView 四项**写入时否决 + 运行时 keep 兜底**（两道独立闸，见 §5.7）；`FLAG_SYSTEM` / `FLAG_UPDATED_SYSTEM_APP` 只做 UI 角标、不否决，因为 Android 没有"系统骨架 vs 普通预装"的界线，厂商商城与 Settings 同为 `FLAG_SYSTEM`，只能用 uid 与 role 分开；④ 完整性闸：`keep` 缺桌面或输入法即整份 `enabled=false`（fail-open）。依据是 0.5.5–0.5.9 的事故链（armed 双控件、`mode=hide` 残留 `show=` 死数据、白名单空集崩）+ 两条实测（Gboard uid 10189、第三方桌面 uid>10000 都躲得过 `uid<10000` 保护）。
 
 **已定（2026-11-21）**
 

@@ -59,9 +59,9 @@ object PkgPolicy {
         /**
          * 当前"系统默认实现"三件套（0.6.0）：桌面 / 输入法 / WebView。
          *
-         * 这三项由 App 侧用 Android 自己的标记算出来（`RoleManager.ROLE_HOME`、
-         * `Settings.Secure.DEFAULT_INPUT_METHOD`、当前 WebView provider），判定层只做字符串比对——
-         * L16.2.1 不许这里出现 android.*。
+         * 这三项由 App 侧用 Android 自己的标记算出来（`ACTION_MAIN`+`CATEGORY_HOME` 的
+         * `resolveActivity`、`Settings.Secure.DEFAULT_INPUT_METHOD`、当前 WebView provider），
+         * 判定层只做字符串比对——L16.2.1 不许这里出现 android.*。
          *
          * 为什么必须有：第三方桌面/输入法 uid 都 >10000，`uid<10000` 那层保护挡不住它们；
          * 藏掉唯一输入法 = 没键盘，藏掉当前桌面 = 没桌面。

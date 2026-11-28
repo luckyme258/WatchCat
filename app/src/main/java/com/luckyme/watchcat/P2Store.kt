@@ -23,6 +23,10 @@ object P2Store {
     private const val LOCAL = "watchcat_p2"
     private const val LEGACY_KEY = "policy"
 
+    /** 0.6.0 的单份隐藏名单：钩子侧优先读这个键（见 `PkgHook.Source`）。 */
+    const val KEY_LIST = "hideList"
+    private const val KEY_MIGRATED = "hideList.migrated"
+
     fun keyOf(pkg: String) = "policy.$pkg"
 
     fun prefs(ctx: Context): SharedPreferences {
@@ -153,5 +157,132 @@ object P2Store {
             if (back == body) done++ else failed++
         }
         return done to failed
+    }
+
+    // ---- 0.6.0：单份隐藏名单（ListScheme） ----------------------------------------
+    //
+    // 与上面的 per-target `Target` 并存一段时间：P2 阶段只落存储与迁移，UI 还是旧的
+    // （旧 UI 继续写 `policy.<pkg>`，钩子读不到 `hideList` 时按 `policy.<pkg>` 兜底，行为不变）；
+    // 等 P3 换成「隐藏名单」页之后，`Target`、`renewBootId`、`configured` 才删。
+
+    /**
+     * 一份名单。**没有 `armed`**——名单非空即生效，这是"配置了但没启用"在数据模型上消失的关键。
+     * `bootId` 仍然保留：它只表示"本轮开机签发的授权"，重启后失效，由列表页一键续期。
+     */
+    data class Scheme(
+        val hide: Set<String> = emptySet(),
+        val keepHome: String? = null,
+        val keepIme: String? = null,
+        val keepWeb: String? = null,
+        val bootId: String? = null,
+        val rom: Boolean = true,
+    )
+
+    /** 没配过返回 null（不拿一份"看起来正常"的空名单骗页面）。 */
+    fun readScheme(ctx: Context): Scheme? {
+        val text = runCatching { prefs(ctx).getString(KEY_LIST, null) }.getOrNull() ?: return null
+        val snap = PkgPolicy.parse(text)
+        return Scheme(
+            hide = snap.hide,
+            keepHome = snap.keepHome,
+            keepIme = snap.keepIme,
+            keepWeb = snap.keepWeb,
+            bootId = snap.bootId,
+            rom = snap.rom,
+        )
+    }
+
+    /** 名单为空时写 `armed=no`：空名单不该让每个被注入进程白挂几十个钩子，也不该让 ROM 层单独生效。 */
+    fun textScheme(s: Scheme, bootId: String): String = buildString {
+        append("# WatchCat 隐藏名单（由 App 生成，勿手改）\n")
+        append("version=1\n")
+        append("armed=").append(if (s.hide.isEmpty()) "no" else "yes").append('\n')
+        append("bootId=").append(bootId).append('\n')
+        append("mode=hide\n")
+        append("hide=").append(s.hide.sorted().joinToString(",")).append('\n')
+        s.keepHome?.let { append("keep.home=").append(it).append('\n') }
+        s.keepIme?.let { append("keep.ime=").append(it).append('\n') }
+        s.keepWeb?.let { append("keep.web=").append(it).append('\n') }
+        append("rom=").append(if (s.rom) "yes" else "no").append('\n')
+    }
+
+    /**
+     * 保存 + 回读校验（同 [save] 的纪律：只信读回来的）。
+     *
+     * **保护集必须完整**：缺当前桌面或当前输入法时直接拒写。判定层还有一道完整性闸会整份禁用，
+     * 但那时用户会看到"保存成功却不生效"，所以必须在写入前就说清楚。
+     */
+    fun saveScheme(ctx: Context, s: Scheme): String {
+        if (!isRemote()) {
+            return "框架未连接：远程 prefs 不可用，名单没有下发（先确认 Vector 在运行、模块已启用）"
+        }
+        if (s.keepHome.isNullOrEmpty() || s.keepIme.isNullOrEmpty()) {
+            return "保护集不完整（读不到当前桌面或当前输入法）：整份名单不会被启用，已拒绝保存"
+        }
+        val boot = bootId()
+        val body = textScheme(s, boot)
+        val p = prefs(ctx).edit().putString(KEY_LIST, body)
+        if (!p.commit()) return "写入失败：框架拒绝了这次 commit"
+        val back = runCatching { prefs(ctx).getString(KEY_LIST, null) }.getOrNull()
+        if (back != body) return "写入后回读不符，已放弃（页面不显示为已生效）"
+        return "已保存：藏 ${s.hide.size} 个" + if (s.rom) " + ROM 特征包" else ""
+    }
+
+    /** 开机后一键续期：只重写 bootId 这一行，名单与保护集原样保留。 */
+    fun renewSchemeBootId(ctx: Context): String {
+        if (!isRemote()) return "框架未连接，续期没有下发"
+        val s = readScheme(ctx) ?: return "还没有名单"
+        if (s.bootId == bootId()) return "名单没过期，不用续期"
+        val body = textScheme(s, bootId())
+        val p = prefs(ctx).edit().putString(KEY_LIST, body)
+        if (!p.commit()) return "续期失败：commit 被拒"
+        val back = runCatching { prefs(ctx).getString(KEY_LIST, null) }.getOrNull()
+        return if (back == body) "已续期（目标应用仍需冷启动）" else "续期后回读不符，已放弃"
+    }
+
+    /**
+     * 0.5.x → 0.6.0 的一次性迁移。
+     *
+     * 1. 把 `policy.<pkg>` 里 `mode=hide` 的集合**取并集**成一份名单（规则见 [LegacyMerge]）；
+     * 2. `armed=yes` 的白名单目标无法用黑名单表达 → 记进 paused，UI 提示"已暂停套用"；
+     * 3. 迁移时**必须**带一份现场探测的保护集，否则新文本会被完整性闸判死；
+     * 4. 原键改名 `legacy.policy.<pkg>` 而不是删除——留给回滚，也不再被旧 UI 当成"已配置"。
+     *
+     * 幂等：`hideList` 已存在或 `hideList.migrated` 已置位就直接返回 `done=false`，跑两次不会重复合并。
+     */
+    data class Migrate(val merged: Int, val paused: List<String>, val done: Boolean)
+
+    fun migrateLegacy(ctx: Context): Migrate {
+        if (!isRemote()) return Migrate(0, emptyList(), false)
+        val p = prefs(ctx)
+        if (p.getString(KEY_LIST, null) != null || p.getBoolean(KEY_MIGRATED, false)) {
+            return Migrate(0, emptyList(), false)
+        }
+        val all = p.all
+        val map = LinkedHashMap<String, String?>()
+        for ((k, v) in all) {
+            if (!k.startsWith("policy.")) continue
+            map[k.removePrefix("policy.")] = v as? String
+        }
+        val r = LegacyMerge.merge(map)
+        val guard = PolicyGuard.keep(ctx)
+        val body = textScheme(
+            Scheme(
+                hide = r.hide,
+                keepHome = guard.home,
+                keepIme = guard.ime,
+                keepWeb = guard.web,
+                rom = true,
+            ),
+            bootId(),
+        )
+        val ed = p.edit().putString(KEY_LIST, body).putBoolean(KEY_MIGRATED, true)
+        for ((legacyPkg, text) in map) {
+            ed.remove("policy.$legacyPkg")
+            if (!text.isNullOrBlank()) ed.putString("legacy.policy.$legacyPkg", text)
+        }
+        if (!ed.commit()) return Migrate(0, emptyList(), false)
+        val back = runCatching { p.getString(KEY_LIST, null) }.getOrNull()
+        return if (back == body) Migrate(r.hide.size, r.paused, true) else Migrate(0, emptyList(), false)
     }
 }
