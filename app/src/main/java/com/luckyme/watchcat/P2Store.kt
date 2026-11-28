@@ -2,6 +2,7 @@ package com.luckyme.watchcat
 
 import android.content.Context
 import android.content.SharedPreferences
+import com.luckyme.watchcat.xposed.LegacyMerge
 import com.luckyme.watchcat.xposed.PkgPolicy
 import java.io.File
 
